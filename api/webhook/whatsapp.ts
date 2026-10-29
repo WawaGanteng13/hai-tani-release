@@ -51,7 +51,7 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
     return false;
   }
   const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), 8000);
+  const t = setTimeout(() => ctl.abort(), 3000);
   try {
     const r = await fetch(`https://graph.facebook.com/v19.0/${phoneId}/messages`, {
       method: "POST",
@@ -81,6 +81,9 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
     res.setHeader("Allow", "GET, POST");
     return res.status(405).send("Method Not Allowed");
   }
+  const T0 = Date.now();
+  const GLOBAL_BUDGET_MS = 9500; // Hobby: respons ke Meta harus < 10 dtk
+  const remaining = () => Math.max(0, GLOBAL_BUDGET_MS - (Date.now() - T0));
   let raw: Buffer;
   try {
     raw = await readRaw(req);
@@ -101,7 +104,7 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
     return res.status(500).json({ error: "forwarder belum dikonfigurasi" });
   }
   const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), 9000);
+  const t = setTimeout(() => ctl.abort(), 6000);
   try {
   // Pipe + chat diminta paralel sejak awal: total ≈ max(pipe, chat), bukan jumlah.
   let inc: { from: string; text: string } | null = null;
@@ -120,7 +123,7 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
   const chatP: Promise<any> = inc
     ? (async () => {
         const chatCtl = new AbortController();
-        const chatT = setTimeout(() => chatCtl.abort(), 7000);
+        const chatT = setTimeout(() => chatCtl.abort(), 5000);
         try {
           const chatRes = await fetch(backend + "/api/chat", {
             method: "POST",
@@ -146,14 +149,23 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
   } finally {
     clearTimeout(t);
   }
-  const text = await up.text();
-  if (up.ok && inc) {
+  const text = await Promise.race([
+    up.text(),
+    new Promise<string>((_, rej) => setTimeout(() => rej(new Error("body-timeout")), remaining())),
+  ]).catch(() => "");
+  if (up.ok && inc && remaining() > 500) {
     try {
-      const chatJson = await chatP.catch(() => null);
+      const chatJson = await Promise.race([
+        chatP.catch(() => null),
+        new Promise((res) => setTimeout(() => res(null), Math.max(0, remaining() - 500))),
+      ]);
       const reply = String((chatJson && chatJson.reply) || "").trim();
       // Jangan teruskan pesan error gerbang sebagai balasan WA.
-      if (reply && !/sesi dashboard berakhir/i.test(reply)) {
-        await sendWaReply(inc.from, reply);
+      if (reply && !/sesi dashboard berakhir/i.test(reply) && remaining() > 1500) {
+        await Promise.race([
+          sendWaReply(inc.from, reply),
+          new Promise((res) => setTimeout(() => res(false), Math.max(0, remaining() - 500))),
+        ]);
       }
     } catch {
       /* best-effort */
