@@ -973,13 +973,19 @@ function generateSmartAdminFallback(
     // If incomplete, DO NOT save to database yet! Ask for missing fields.
     if (!check.isComplete) {
       const incomplete = formatIncompleteFarmerPrompt(merged, activeAdmin.nama, true);
+      if (!merged.noHp) incomplete.reply += "\n\n➕ *Admin: cantumkan juga No HP/WA petani* (misal: 0812xxxxxxx).";
       return {
         ...incomplete,
         isAdminAction: true,
       };
     }
 
-    // Only save when data is complete
+    // Only save when data is complete (+ nomor petani wajib untuk pendaftaran admin)
+    if (!merged.noHp) {
+      const incompleteNoHp = formatIncompleteFarmerPrompt(merged, activeAdmin.nama, true);
+      incompleteNoHp.reply += "\n\n➕ *Admin: cantumkan juga No HP/WA petani* (misal: 0812xxxxxxx).";
+      return { ...incompleteNoHp, isAdminAction: true };
+    }
     const newRecord = saveFarmerRecord(merged, activeAdmin, activeAdmin.noHp);
     return {
       reply: formatSuccessFarmerRegistration(newRecord, activeAdmin),
@@ -1394,6 +1400,7 @@ function saveWaDraft(phone: string | undefined, body: any) {
     d = { ...blankWaDraft(), updatedAt: 0 };
   }
   if (body.clearErpDrafts) { d.cash = {}; d.stock = {}; d.hpp = {}; }
+  if (body.clearFarmerDraft) { d.farmer = {}; }
   if (body.extracted && typeof body.extracted === "object") d.farmer = body.savedRecord ? {} : body.extracted;
   else if (body.savedRecord) d.farmer = {};
   if (body.extractedSupplier && typeof body.extractedSupplier === "object") d.supplier = body.savedSupplier ? {} : body.extractedSupplier;
@@ -4634,6 +4641,49 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       }
     }
 
+    // 0d. Lanjutan draf pendaftaran: draf terbuka + tanpa intent fungsional baru
+    // → gabung + prompt checklist (hemat LLM, anti-lupa antar-pesan WA).
+    const draftHasAny = currentDraft && (
+      currentDraft.nama || currentDraft.noHp || currentDraft.komoditas ||
+      currentDraft.luasLahan || currentDraft.alamat || currentDraft.kabupaten
+    );
+    if (draftHasAny) {
+      if (/^\s*batal/i.test(message || "")) {
+        return res.json({
+          reply: "Baik, draf pendaftaran petani dibatalkan. Ketik *daftar* kapan pun untuk memulai lagi.",
+          quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "Daftarkan Petani"] : ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini"],
+          extracted: {}, isComplete: true, isAdminAction: isAdmin, clearFarmerDraft: true, aiProvider: "rule_based",
+        } as any);
+      }
+      const lwr = (message || "").toLowerCase();
+      const hasNewIntent =
+        detectErpIntent(lwr, null) || isSupplierIntent(message) ||
+        (isAdmin && isAnalyticsQuery(lwr)) ||
+        /harga|pasar|anomali|hama|penyakit|wereng|ulat|tikus|keong|sundep|blas|kresek|tungro|pupuk|dosis|pemupukan|urea|phonska|npk|takaran/.test(lwr) ||
+        !!handleFastSmalltalk(message, isAdmin, activeAdmin, effPhone, true);
+      if (!hasNewIntent) {
+        const reg = extractFarmerFromText(message, currentDraft || {});
+        const merged = { ...(currentDraft || {}), ...(reg.extracted || {}) };
+        const check = checkFarmerCompleteness(merged);
+        const needFarmerPhone = isAdmin && !merged.noHp;
+        if (check.isComplete && !needFarmerPhone) {
+          const rec = saveFarmerRecord(merged, isAdmin ? activeAdmin : undefined, effPhone);
+          return res.json({
+            reply: formatSuccessFarmerRegistration(rec),
+            extracted: rec, isComplete: true, savedRecord: rec, isAdminAction: isAdmin,
+            quickReplies: isAdmin
+              ? ["📊 Rekap Semua Petani", "Verifikasi Semua", "Daftarkan Lagi"]
+              : ["Cek Harga Cabai Hari Ini", "Konsultasi Hama Tanaman", "Daftarkan Lahan Lain"],
+          } as any);
+        }
+        const inc: any = formatIncompleteFarmerPrompt(merged, activeAdmin?.nama, isAdmin);
+        if (needFarmerPhone) {
+          inc.reply += "\n\n➕ *Admin: cantumkan juga No HP/WA petani* (misal: 0812xxxxxxx).";
+        }
+        return res.json({ ...inc, isAdminAction: isAdmin, aiProvider: "rule_based" } as any);
+      }
+    }
+
     // 0c. Smart Query Cache Lookup (Pillar 3: Reusing Existing Results)
     const cacheKey = getNormalizedCacheKey(isAdmin ? "admin" : "farmer", message);
     const isCacheable = isQuerySafeToCache(message);
@@ -4802,7 +4852,8 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
           // Tolak isComplete palsu: klaim lengkap tanpa satu pun field terisi = abaikan.
           const mergedHasAnyField = !!(merged.nama || merged.noHp || merged.komoditas || merged.luasLahan || merged.alamat || merged.kabupaten);
           if (isAddRequest || (parsed.isComplete && mergedHasAnyField)) {
-            if (check.isComplete) {
+            const needFarmerPhone = !merged.noHp;
+            if (check.isComplete && !needFarmerPhone) {
               const newRecord = saveFarmerRecord(merged, activeAdmin, activeAdmin.noHp);
               parsed.savedRecord = newRecord;
               parsed.extracted = newRecord;
@@ -4811,6 +4862,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
             } else {
               // INCOMPLETE: DO NOT save to database! Ask for missing fields politely
               const incomplete = formatIncompleteFarmerPrompt(merged, activeAdmin.nama, true);
+              if (!merged.noHp) incomplete.reply += "\n\n➕ *Admin: cantumkan juga No HP/WA petani* (misal: 0812xxxxxxx).";
               parsed.reply = incomplete.reply;
               parsed.quickReplies = incomplete.quickReplies;
               parsed.extracted = merged;
