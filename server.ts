@@ -430,8 +430,47 @@ function formatIncompleteFarmerPrompt(
 function saveFarmerRecord(
   draft: Partial<FarmerRecord>,
   activeAdmin?: AdminUser,
-  senderPhone?: string
+  senderPhone?: string,
+  source?: string,
 ): FarmerRecord {
+  // D2 dedupe: cari existing by noHp ternormalisasi → update-in-place, bukan insert.
+  // Kunci = draft.noHp; senderPhone hanya dipakai bila pendaftar BUKAN admin
+  // (di jalur admin senderPhone = nomor admin, bukan identitas petani).
+  // Nomor placeholder ("+62 812-xxxx-xxxx" → "0812") dan string pendek (< 10 digit)
+  // ditolak agar tidak saling meniban.
+  const rawKey = draft.noHp || (!activeAdmin ? senderPhone : "") || "";
+  const normKey = normalizePhone(rawKey);
+  if (normKey.length >= 10) {
+    const existing = farmersDb.find((f) => normalizePhone(f.noHp) === normKey);
+    if (existing) {
+      existing.nama = draft.nama || existing.nama;
+      if (draft.noHp) existing.noHp = draft.noHp;
+      existing.alamat = draft.alamat || existing.alamat;
+      existing.kabupaten = draft.kabupaten || existing.kabupaten;
+      if (draft.luasLahan && Number(draft.luasLahan) > 0) {
+        existing.luasLahan = Number(draft.luasLahan);
+        existing.luasLahanFormatted = draft.luasLahanFormatted || `${draft.luasLahan} Ha`;
+      }
+      existing.komoditas = draft.komoditas || existing.komoditas;
+      existing.varietas = draft.varietas || existing.varietas;
+      existing.estimasiPanen = draft.estimasiPanen || existing.estimasiPanen;
+      if (draft.estimasiHasilTon && Number(draft.estimasiHasilTon) > 0) {
+        existing.estimasiHasilTon = Number(draft.estimasiHasilTon);
+      } else if (draft.luasLahan && Number(draft.luasLahan) > 0) {
+        existing.estimasiHasilTon = Number((Number(draft.luasLahan) * 6).toFixed(1));
+      }
+      if (activeAdmin) existing.statusVerifikasi = "Terverifikasi";
+      existing.syncStatus = "synced";
+      saveFarmersToDisk();
+      bumpDataVersion();
+      emitCanonicalEvent({
+        source: source || "wa-chat", entity: "farmer", entityId: existing.id,
+        action: "update", actor: senderPhone,
+        payload: { nama: existing.nama, komoditas: existing.komoditas, luasLahan: existing.luasLahan, kabupaten: existing.kabupaten, statusVerifikasi: existing.statusVerifikasi },
+      });
+      return existing;
+    }
+  }
   const newRecord: FarmerRecord = {
     id: nextId("TANI", farmersDb.map((f) => f.id)),
     timestamp: new Date().toISOString().replace("T", " ").substring(0, 19),
