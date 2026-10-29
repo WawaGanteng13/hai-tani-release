@@ -1,9 +1,9 @@
 # Technical Requirement Document (TRD)
 ## Hai Tani (TaniAI Platform Architecture)
 
-**Versi Dokumen:** 1.0.0  
-**Tanggal Rilis:** Oktober 2026  
-**Status:** Approved  
+**Versi Dokumen:** 1.1.0  
+**Tanggal Rilis:** Oktober 2026 (Amandemen Audit Hardening)  
+**Status:** Approved — Amandemen Keamanan, Parser & Masking  
 
 ---
 
@@ -19,7 +19,8 @@ Sistem Hai Tani dirancang dengan arsitektur **Hybrid Edge & Cloud** yang memaduk
 +--------------------------------------------------------------------------------+
 |                         Node.js Express Backend (server.ts)                   |
 |                                                                                |
-|  [Pilar 1: Role-Based Access Control] <---> Admin Phone Directory (adminsDb)   |
+|  [Pilar 0: Session Auth]              <---> Cookie tani_sid HMAC + requireSession() di ±45 route |
+|  [Pilar 1: Role-Based Access Control] <---> Admin Phone Directory (adminsDb) + cek aktif  |
 |  [Pilar 2: Regex Fast-Path (0ms)]     ---> Hit: Langsung routing intent        |
 |  [Pilar 3: Laya System-1 Sidecar]     ---> Miss: Panggil http://127.0.0.1:8787 |
 |  [Pilar 4: Universal AI Gateway]      ---> Gemini 2.5 Flash / 9Router Fallback |
@@ -89,3 +90,12 @@ Mengacu pada arsitektur resmi [NandhaKishorM/laya](https://github.com/NandhaKish
 * **Deteksi Pembatalan Klien (Client Abort):** Event `res.on('close')` mendeteksi soket yang ditutup pengguna secara instan dan memicu `AbortController.abort()` ke API Gemini untuk mencegah pemborosan token.
 * **Lean Targeted Context:** Backend tidak membuang seluruh database JSON ribuan baris ke prompt LLM. Sebaliknya, query pengguna difilter terlebih dahulu (misal: hanya melampirkan data Subang jika kata "Subang" disebutkan), memangkas konsumsi token hingga 85%.
 * **Sanitasi Masukan:** Panjang teks pengguna dibatasi maksimal 2000 karakter, teks HTML di-escape (`escHtml`), dan parameter query disanitasi.
+
+---
+
+### 6. Amandemen Keamanan 29 Okt 2026 (hasil audit)
+* **Sesi dashboard:** Tanpa dep baru — `node:crypto` HMAC cookie (`tani_sid`), kunci 32B di `DATA_DIR/.session-key` (0600, bukan `.env`). Password scrypt + salt per admin; migrasi satu-kali via `POST /api/auth/setup-password`. Middleware `requireSession([roles])` melindungi ±45 route tulis/baca-PII; `/api/chat` memakai gerbang ganda (sesi dashboard ATAU `x-tani-forward-secret` forwarder, self-assert mentah → 401).
+* **Webhook:** Verifikasi `X-Hub-Signature-256` bila `WHATSAPP_APP_SECRET` di-set (fail-open + warning boot bila tidak — tidak memutus langganan prod); challenge sebagai `text/plain`; token default dipertahankan + log ERROR tiap dipakai.
+* **Parser:** `parseIdNumber` sentral — titik grup-3 = ribuan, koma = desimal; dipakai ulang `parseRupiah`/`parseQtySatuan`/`parseKg`.
+* **Masking PII:** `maskPhone()` bersama; konteks AI tanpa nomor penuh; cabang detail petani hanya untuk admin; `resolveErpScope` kini mengecek `aktif` (selaras `findAdmin`).
+* **Batasan jujur:** HMAC memakai body ter-parse (rawBody follow-up), sesi in-memory (relogin tiap restart), single-proses (cluster belum diverifikasi).

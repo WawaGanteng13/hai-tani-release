@@ -37,10 +37,18 @@ export const AdminManagerModal: React.FC<AdminManagerModalProps> = ({
   const [role, setRole] = useState<'ADMIN_UTAMA' | 'PETUGAS_PPL' | 'DATA_SCIENTIST'>('PETUGAS_PPL');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const activeAdmins = admins.filter((a) => a.aktif);
-  const [requesterNoHp, setRequesterNoHp] = useState(
-    activeAdmins.length > 0 ? activeAdmins[0].noHp : ''
-  );
+  const [sessionNoHp, setSessionNoHp] = useState('');
+  const [sessionRole, setSessionRole] = useState('');
+  React.useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (j) { setSessionNoHp(j.noHp || ''); setSessionRole(j.role || ''); }
+      })
+      .catch(() => {});
+  }, []);
+  // Pengesah = admin yang sedang login (sesi server), bukan pilihan manual.
+  const requesterNoHp = sessionNoHp;
 
   if (!isOpen) return null;
 
@@ -54,7 +62,7 @@ export const AdminManagerModal: React.FC<AdminManagerModalProps> = ({
     }
 
     if (!requesterNoHp) {
-      setErrorMsg('Pilih admin pengesah dulu (baru bisa menambah/mencabut admin).');
+      setErrorMsg('Sesi login tidak terdeteksi — muat ulang dashboard dan masuk kembali.');
       return;
     }
 
@@ -212,21 +220,13 @@ export const AdminManagerModal: React.FC<AdminManagerModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                  Disahkan oleh (admin aktif) *
+                  Disahkan oleh (dari sesi login) *
                 </label>
-                <select
-                  value={requesterNoHp}
-                  onChange={(e) => setRequesterNoHp(e.target.value)}
-                  required
-                  className="w-full text-xs px-3 py-2 bg-white border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none"
-                >
-                  <option value="">— Pilih admin pengesah —</option>
-                  {activeAdmins.map((a) => (
-                    <option key={a.id} value={a.noHp}>{a.nama} ({a.noHp})</option>
-                  ))}
-                </select>
+                <div className="w-full text-xs px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl font-mono text-slate-700">
+                  {requesterNoHp || '— memuat sesi... —'}
+                </div>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  Penambahan/pencabutan admin wajib disahkan admin aktif terdaftar (jejak audit tersimpan).
+                  Penambahan/pencabutan admin disahkan otomatis oleh admin yang sedang login (jejak audit tersimpan).
                 </p>
               </div>
 
@@ -280,7 +280,7 @@ export const AdminManagerModal: React.FC<AdminManagerModalProps> = ({
 
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-xs text-slate-500">
                       <span className="font-mono text-slate-800 font-semibold bg-slate-100 px-1.5 py-0.5 rounded">
-                        {admin.noHp}
+                        {sessionRole === 'ADMIN_UTAMA' ? admin.noHp : String(admin.noHp || '').replace(/.(?=.{4})/g, '•')}
                       </span>
                       <span>&bull;</span>
                       <span className="flex items-center space-x-1">
@@ -303,7 +303,7 @@ export const AdminManagerModal: React.FC<AdminManagerModalProps> = ({
                 {/* Delete button (except default primary admin) */}
                 {admin.id !== 'ADM-001' && (
                   <button
-                    onClick={() => onDeleteAdmin(admin.id, requesterNoHp || (activeAdmins[0]?.noHp ?? ''))}
+                    onClick={() => onDeleteAdmin(admin.id, requesterNoHp)}
                     className="self-end sm:self-center p-2 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-xl transition cursor-pointer"
                     title="Hapus otoritas admin"
                   >

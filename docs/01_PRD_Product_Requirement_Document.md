@@ -1,9 +1,9 @@
 # Product Requirement Document (PRD)
 ## Hai Tani (Kang Tani AI & AgroSpasial Platform)
 
-**Versi Dokumen:** 1.0.0  
-**Tanggal Rilis:** Oktober 2026  
-**Status:** Disetujui (Approved)  
+**Versi Dokumen:** 1.1.0  
+**Tanggal Rilis:** Oktober 2026 (Amandemen Audit Hardening)  
+**Status:** Disetujui — Amandemen Keamanan, ERP & Data Training  
 **Target Pengguna:** Petani Lapangan, Penyuluh Pertanian Lapangan (PPL/BPP), Dinas Pertanian & Ketahanan Pangan, Pemilik Kios Saprodi, Data Scientist Pertanian
 
 ---
@@ -74,10 +74,27 @@ Hai Tani hadir sebagai solusi terintegrasi: memanfaatkan antarmuka WhatsApp berb
 * Notifikasi anomali lonjakan ekstrim (misal: lonjakan cabai rawit merah > 30%).
 * Ringkasan eksekutif neraca panen gabungan luas lahan (Ha) dan tonase prediksi panen.
 
+#### FR-06: ERP Pertanian Fase 5 (Buku Kas, Stok Kios & HPP)
+* **FR-06.1 Buku Kas Petani:** Catat MASUK/KELUAR via chat ("catat beli pupuk 2 sak 350 ribu") maupun dashboard; kategori tervalidasi silang terhadap jenis; anti-duplikat 5 menit; saldo per petani.
+* **FR-06.2 Stok Kios:** Mutasi MASUK/KELUAR/PENYESUAIAN per kios; penolakan stok negatif (saldo dicek sebelum KELUAR); satuan tervalidasi.
+* **FR-06.3 HPP & Margin:** Hitung HPP per kg dari agregat biaya (filter komoditas + musim tanam), margin dan % margin terhadap harga jual; tolak bila volume ≤ 0 atau belum ada biaya.
+* **FR-06.4 Parser Angka Indonesia:** Titik sebagai pemisah ribuan ("1.500.000" → 1500000), koma sebagai desimal — berlaku konsisten di seluruh ekstraktor chat.
+
 ---
 
 ### 5. Batasan & Kebutuhan Non-Fungsional (Non-Functional Requirements)
 * **Kinerja (Performance):** Latensi respon klasifikasi intent di bawah 50 ms menggunakan router Laya System-1. Respon chatbot lengkap di bawah 2.5 detik.
-* **Keamanan Data (Security & Privacy):** Nomor telepon dan koordinat detail lahan petani tidak dipublikasikan ke publik tanpa otentikasi peran (RBAC).
+* **Keamanan Data (Security & Privacy):** Nomor telepon dan koordinat detail lahan petani tidak dipublikasikan ke publik tanpa otentikasi peran. Dashboard web wajib login sesi (cookie HttpOnly + SameSite, password scrypt); seluruh endpoint tulis/baca-PII di balik `requireSession()`. Webhook WA memverifikasi HMAC `X-Hub-Signature-256` bila secret dikonfigurasi; challenge verifikasi dikirim sebagai `text/plain`. Nomor HP tidak disuntik penuh ke prompt AI (masking, detail kontak hanya untuk admin).
+* **Kesiapan Data Training:** Seluruh kejadian domain (kas, stok, HPP, registrasi, verifikasi) diekspor sebagai event-log append-only berversi (`eventId, ts, source, entity, entityId, payload, schemaV`) — lihat BSD §4. JSON runtime adalah system of record operasional; Sheets adalah cermin baca.
 * **Ketersediaan (Availability):** Sistem fallback cerdas (rule-based heuristic) tetap berjalan 100% aktif sekalipun koneksi internet ke provider AI luar terganggu.
 * **Responsivitas Layanan (Mobile Friendly):** Seluruh antarmuka portal dapat dioperasikan secara ergonomis di layar ponsel smartphone (minimum tap target 44px).
+
+---
+
+### 6. Kriteria Terima (Acceptance Criteria — hasil audit 29 Okt 2026)
+* **A-Auth:** Tanpa cookie sesi valid, semua endpoint tulis + baca-PII menjawab 401; login salah menjawab 401 tanpa membocorkan akun mana yang salah.
+* **A-Parser:** "1.500.000" → 1500000; "2,5 juta" → 2500000; "1.5" → 1.5; kategori silang ("jual … kategori Pupuk") ditolak dengan pesan jelas, bukan 400 generik.
+* **A-ERP:** Stok tidak bisa negatif via KELUAR; HPP menolak volume ≤ 0 dan biaya nol; duplikat kas 5 menit ditolak 409.
+* **A-Webhook:** Tanpa secret → mode kompatibilitas + warning boot; dengan secret → signature invalid ditolak 403.
+* **A-PII:** Respons AI/chatbot tidak memuat nomor HP penuh untuk non-admin; `/api/trace/:id` tetap publik tapi termasking.
+* **A-Data:** Setiap tulis kas/stok/HPP/registrasi menghasilkan event di log kanonis (BSD §4) dengan `schemaV` terisi.

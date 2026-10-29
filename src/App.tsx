@@ -43,10 +43,43 @@ export default function App() {
   const [layaStatus, setLayaStatus] = useState<LayaStatus | null>(null);
   const [layaLoading, setLayaLoading] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'warning' | 'info'; text: string } | null>(null);
+  const [me, setMe] = useState<{ nama: string; role: string; noHp: string } | null>(null);
+  const [loginNoHp, setLoginNoHp] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
 
   const showToast = (text: string, type: 'success' | 'warning' | 'info' = 'success') => {
     setToastMessage({ text, type });
     setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginBusy(true);
+    setLoginError('');
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ noHp: loginNoHp, password: loginPassword }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || 'Login gagal');
+      }
+      setLoginPassword('');
+      await loadData();
+    } catch (err: any) {
+      setLoginError(err.message || 'Login gagal');
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    setMe(null);
   };
 
   const fetchLayaStatus = async () => {
@@ -66,6 +99,13 @@ export default function App() {
 
   // Fetch initial data from server
   const loadData = async () => {
+    try {
+      const meRes = await fetch('/api/auth/me');
+      if (!meRes.ok) { setMe(null); setLoading(false); return; }
+      setMe(await meRes.json());
+    } catch {
+      setMe(null); setLoading(false); return;
+    }
     setLoading(true);
     try {
       const [fRes, cRes, nRes, rRes, aRes, sRes] = await Promise.all([
@@ -298,6 +338,37 @@ export default function App() {
   const anomaliesCount = commodities.filter(
     (c) => c.statusAnomali === 'LONJAKAN_EKSTREM' || c.statusAnomali === 'PENURUNAN_DRASTIS'
   ).length;
+
+  if (!me && !loading) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans">
+        <form onSubmit={handleLogin} className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 w-full max-w-sm space-y-4">
+          <div className="text-center">
+            <div className="text-3xl mb-1">🌾</div>
+            <h1 className="font-bold text-slate-900 text-lg">TaniAI Dashboard</h1>
+            <p className="text-xs text-slate-500">Masuk dengan nomor admin + password</p>
+          </div>
+          {loginError && (
+            <div className="bg-rose-50 text-rose-700 text-xs p-2 rounded-lg border border-rose-200">{loginError}</div>
+          )}
+          <input
+            type="text" value={loginNoHp} onChange={(e) => setLoginNoHp(e.target.value)}
+            placeholder="No. WhatsApp admin" required
+            className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none"
+          />
+          <input
+            type="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)}
+            placeholder="Password" required
+            className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none"
+          />
+          <button type="submit" disabled={loginBusy} className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold disabled:opacity-50">
+            {loginBusy ? 'Memeriksa...' : 'Masuk'}
+          </button>
+          <p className="text-[11px] text-slate-400 text-center">Admin baru? Set password dulu via POST /api/auth/setup-password.</p>
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans text-slate-800 antialiased selection:bg-emerald-500 selection:text-white">

@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { spawn, ChildProcess } from "child_process";
+import crypto from "node:crypto";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import {
@@ -132,6 +133,9 @@ function initPersistence() {
       hppDb = hppData as HppReport[];
       console.log(`[Storage] Berhasil memuat ${hppDb.length} laporan HPP dari disk (${HPP_FILE})`);
     }
+
+    // Event log dimuat terpisah via loadEventsDb() (dipanggil di startServer,
+    // setelah semua deklarasi top-level — menghindari TDZ).
   } catch (err) {
     console.error("[Storage] Inisialisasi storage lokal gagal:", err);
   }
@@ -497,6 +501,11 @@ function saveFarmerRecord(
   farmersDb.unshift(newRecord);
   saveFarmersToDisk();
   bumpDataVersion();
+  emitCanonicalEvent({
+    source: source || "wa-chat", entity: "farmer", entityId: newRecord.id,
+    action: "create", actor: senderPhone,
+    payload: { nama: newRecord.nama, komoditas: newRecord.komoditas, luasLahan: newRecord.luasLahan, kabupaten: newRecord.kabupaten, statusVerifikasi: newRecord.statusVerifikasi },
+  });
   return newRecord;
 }
 
@@ -701,7 +710,8 @@ function checkSupplierCompleteness(record: Partial<SupplierRecord>): {
 function saveSupplierRecord(
   draft: Partial<SupplierRecord>,
   activeAdmin?: AdminUser,
-  senderPhone?: string
+  senderPhone?: string,
+  source?: string,
 ): SupplierRecord {
   const newId = nextId("SUP", suppliersDb.map((s) => s.id));
   const now = new Date();
@@ -743,6 +753,11 @@ function saveSupplierRecord(
   suppliersDb.unshift(newRecord);
   saveSuppliersToDisk();
   bumpDataVersion();
+  emitCanonicalEvent({
+    source: source || "wa-chat", entity: "supplier", entityId: newRecord.id,
+    action: "create", actor: senderPhone,
+    payload: { nama: newRecord.nama, kategori: newRecord.kategori, kabupaten: newRecord.kabupaten, statusKemitraan: newRecord.statusKemitraan },
+  });
   return newRecord;
 }
 
@@ -1149,6 +1164,44 @@ function escHtml(s: unknown): string {
 function escAttr(s: unknown): string {
   return escHtml(s).replace(/[\r\n]+/g, " ");
 }
+function maskPhone(hp: unknown): string {
+  const s = String(hp || "");
+  return s.length > 4 ? s.slice(0, -4).replace(/[0-9]/g, "•") + s.slice(-4) : "••••";
+}
+
+// ---------- Canonical event log (sumber data training; PII termasking) ----------
+let eventsDb: any[] = [];
+function emitCanonicalEvent(e: {
+  source: string; entity: string; entityId: string; action: string;
+  actor?: unknown; payload: Record<string, unknown>;
+}) {
+  try {
+    const payload: Record<string, unknown> = { ...(e.payload || {}) };
+    for (const k of ["noHp", "kontak", "senderPhone", "dicatatOleh", "generatedBy", "actor"]) {
+      if (typeof payload[k] === "string" && payload[k]) payload[k] = maskPhone(payload[k]);
+    }
+    eventsDb.unshift({
+      eventId: `EVT-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36)}`,
+      ts: new Date().toISOString(),
+      source: e.source, entity: e.entity, entityId: e.entityId,
+      action: e.action,
+      actor: typeof e.actor === "string" && e.actor ? maskPhone(e.actor) : "system",
+      payload, schemaV: 1,
+    });
+    if (eventsDb.length > 5000) eventsDb.length = 5000;
+    writeJsonAtomic(`${DATA_DIR}/events_db.json`, eventsDb, "events_db.json");
+  } catch (err) {
+    console.error("[Events] gagal menulis event kanonis:", err);
+  }
+}
+function loadEventsDb(): void {
+  try {
+    const loaded = readJsonSafe<unknown>(`${DATA_DIR}/events_db.json`, [], "events_db.json");
+    if (Array.isArray(loaded)) eventsDb = loaded as any[];
+  } catch (err) {
+    console.error("[Events] gagal memuat event kanonis:", err);
+  }
+}
 function cleanHost(h: unknown, fb = "localhost:3000"): string {
   const s = String(h || fb).slice(0, 80);
   return /^[\w.\-:]+$/.test(s) ? s : fb;
@@ -1199,10 +1252,8 @@ function parseRupiah(text: string): number | undefined {
   }
   const bare = [...t.matchAll(/[\d][\d.,]*/g)].map((x) => x[0]);
   if (bare.length === 1) {
-    let num = bare[0];
-    if (num.includes(",")) num = num.replace(/\./g, "").replace(",", ".");
-    const n = parseFloat(num);
-    if (Number.isFinite(n) && n > 0) return Math.round(n);
+    const n = parseIdNumber(bare[0]);
+    if (n !== undefined) return Math.round(n);
   }
   return undefined;
 }
@@ -1210,10 +1261,8 @@ function parseRupiah(text: string): number | undefined {
 function parseQtySatuan(text: string): { qty?: number; satuan?: string } {
   const m = String(text || "").toLowerCase().match(/([\d][\d.,]*)\s*(sak|kg|kilogram|liter|botol|bungkus|pak|unit|karung|ton)\b/);
   if (!m) return {};
-  let num = m[1];
-  if (num.includes(",")) num = num.replace(/\./g, "").replace(",", ".");
-  const qty = parseFloat(num);
-  if (!Number.isFinite(qty) || qty <= 0) return {};
+  const qty = parseIdNumber(m[1]);
+  if (qty === undefined) return {};
   const unitMap: Record<string, string> = { kilogram: "kg", karung: "sak" };
   const satuan = unitMap[m[2]] || m[2];
   if (satuan === "ton") return { qty: Math.round(qty * 1000 * 100) / 100, satuan: "kg" };
@@ -1223,10 +1272,8 @@ function parseQtySatuan(text: string): { qty?: number; satuan?: string } {
 function parseKg(text: string): number | undefined {
   const m = String(text || "").toLowerCase().match(/([\d][\d.,]*)\s*(ton|kg|kilo|kwintal|kuintal|kw)\b/);
   if (!m) return undefined;
-  let num = m[1];
-  if (num.includes(",")) num = num.replace(/\./g, "").replace(",", ".");
-  const n = parseFloat(num);
-  if (!Number.isFinite(n) || n <= 0) return undefined;
+  const n = parseIdNumber(m[1]);
+  if (n === undefined) return undefined;
   const mult = m[2] === "ton" ? 1000 : m[2].startsWith("k") && m[2] !== "kg" && m[2] !== "kilo" ? 100 : 1;
   return Math.round(n * mult * 100) / 100;
 }
@@ -1364,8 +1411,15 @@ function extractHppFromText(text: string, existing: HppChatDraft = {}): { extrac
 }
 
 function parseIdNumber(raw: string): number | undefined {
-  let num = String(raw || "");
-  if (num.includes(",")) num = num.replace(/\./g, "").replace(",", ".");
+  let num = String(raw || "").trim();
+  if (!num) return undefined;
+  if (num.includes(",")) {
+    // "1.500.000,75" / "2,5": titik = ribuan, koma = desimal
+    num = num.replace(/\./g, "").replace(",", ".");
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(num)) {
+    // "1.500.000" / "1.500": grup tepat 3 digit = pemisah ribuan
+    num = num.replace(/\./g, "");
+  } // satu titik non-ribuan ("1.5") dibiarkan sebagai desimal
   const n = parseFloat(num);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
@@ -1377,6 +1431,10 @@ function checkCashCompleteness(d: Partial<CashTransaction> & { farmerId?: string
   if (!d.kategori) missing.push("kategori biaya");
   if (d.jumlahRp === undefined) missing.push("nominal rupiah");
   if (!d.farmerId) missing.push("petani pemilik");
+  const allowed = d.jenis === "MASUK" ? CASH_KATEGORI_MASUK : d.jenis === "KELUAR" ? CASH_KATEGORI_KELUAR : [];
+  if (d.jenis && d.kategori && !allowed.includes(d.kategori)) {
+    missing.push(`kategori "${d.kategori}" tidak cocok untuk jenis ${d.jenis}`);
+  }
   return { isComplete: missing.length === 0, missingFields: missing };
 }
 
@@ -1709,7 +1767,7 @@ function buildLeanTargetedContext(message: string, isAdmin: boolean) {
     detailsType = "single_farmer";
     targetedDetails = `DATA DETAIL PETANI YANG DITANYAKAN:
 - Nama: ${matchedFarmer.nama} (ID: ${matchedFarmer.id})
-- Kontak: ${matchedFarmer.noHp}
+- Kontak: ${isAdmin ? maskPhone(matchedFarmer.noHp) : "(disembunyikan — hanya admin)"}
 - Komoditas: ${matchedFarmer.komoditas} (${matchedFarmer.varietas || "Unggul"})
 - Luas: ${matchedFarmer.luasLahan} Ha | Panen: ${matchedFarmer.estimasiPanen} (~${matchedFarmer.estimasiHasilTon} Ton)
 - Lokasi: ${matchedFarmer.alamat}, ${matchedFarmer.kabupaten}
@@ -2121,7 +2179,7 @@ const STOCK_SHEET_ALIASES = new Set(["lembar 4", "lembar4", "stok", "stok kios",
 function resolveErpScope(senderPhone?: string): { isAdmin: boolean; farmerId: string | null; supplierId: string | null } {
   const norm = normalizePhone(senderPhone);
   if (!norm) return { isAdmin: false, farmerId: null, supplierId: null };
-  if (adminsDb.some((a) => normalizePhone(a.noHp) === norm)) return { isAdmin: true, farmerId: null, supplierId: null };
+  if (adminsDb.some((a) => a.aktif && normalizePhone(a.noHp) === norm)) return { isAdmin: true, farmerId: null, supplierId: null };
   const farmer = farmersDb.find((f) => normalizePhone(f.noHp) === norm);
   if (farmer) return { isAdmin: false, farmerId: farmer.id, supplierId: null };
   const supplier = suppliersDb.find((s) => normalizePhone(s.kontak) === norm);
@@ -2136,6 +2194,47 @@ function csvCell(val: any): string {
     str = "'" + str;
   }
   return `"${str}"`;
+}
+
+// ---------- Auth sesi dashboard (tanpa dep baru; kunci di DATA_DIR, bukan .env) ----------
+const SESSION_KEY_FILE = `${DATA_DIR}/.session-key`;
+function sessionKey(): Buffer {
+  try {
+    if (!fs.existsSync(SESSION_KEY_FILE)) {
+      fs.writeFileSync(SESSION_KEY_FILE, crypto.randomBytes(32).toString("hex"), { mode: 0o600 });
+    }
+    return Buffer.from(fs.readFileSync(SESSION_KEY_FILE, "utf-8").trim(), "hex");
+  } catch {
+    return Buffer.from("tani-ai-dev-fallback-key-32b!!xxxxxxxx".slice(0, 32));
+  }
+}
+const sessions = new Map<string, { adminId: string; exp: number }>();
+function mintSession(adminId: string): string {
+  const sid = crypto.randomBytes(16).toString("hex");
+  const sig = crypto.createHmac("sha256", sessionKey()).update(sid).digest("hex");
+  sessions.set(sid, { adminId, exp: Date.now() + 12 * 3600e3 });
+  return `${sid}.${sig}`;
+}
+function readSession(req: any): { adminId: string } | null {
+  const m = String(req.headers?.cookie || "").match(/tani_sid=([a-f0-9]{32})\.([a-f0-9]{64})/);
+  if (!m) return null;
+  if (crypto.createHmac("sha256", sessionKey()).update(m[1]).digest("hex") !== m[2]) return null;
+  const s = sessions.get(m[1]);
+  if (!s || s.exp < Date.now()) { sessions.delete(m[1]); return null; }
+  s.exp = Date.now() + 12 * 3600e3;
+  return { adminId: s.adminId };
+}
+function requireSession(roles?: string[]) {
+  return (req: any, res: any, next: any) => {
+    const s = readSession(req);
+    const adm = s ? adminsDb.find((a) => a.id === s.adminId) : undefined;
+    if (!adm || !adm.aktif) return res.status(401).json({ error: "Butuh login admin." });
+    (req as any).sessionAdmin = adm;
+    if (roles && roles.length && !roles.includes(adm.role)) {
+      return res.status(403).json({ error: "Peran tidak diizinkan." });
+    }
+    next();
+  };
 }
 
 function isValidIsoDate(s: any): boolean {
@@ -2244,6 +2343,11 @@ function processCashEntry(data: any): { status: number; body: any } {
   cashDb.unshift(record);
   saveCashToDisk();
   bumpDataVersion();
+  emitCanonicalEvent({
+    source: data.senderPhone ? "wa-chat" : "dashboard", entity: "cash", entityId: record.id,
+    action: "create", actor: data.senderPhone,
+    payload: { farmerId: record.farmerId, jenis: record.jenis, kategori: record.kategori, jumlahRp: record.jumlahRp, komoditas: record.komoditas, musimTanam: record.musimTanam },
+  });
   return { status: 201, body: record };
 }
 
@@ -2306,6 +2410,11 @@ function processStockEntry(data: any): { status: number; body: any } {
   stockDb.unshift(record);
   saveStockToDisk();
   bumpDataVersion();
+  emitCanonicalEvent({
+    source: data.senderPhone ? "wa-chat" : "dashboard", entity: "stock", entityId: record.id,
+    action: "create", actor: data.senderPhone,
+    payload: { supplierId: record.supplierId, produk: record.produk, satuan: record.satuan, arah: record.arah, qty: record.qty },
+  });
   return { status: 201, body: record };
 }
 
@@ -2372,6 +2481,11 @@ function processHppGenerate(data: any): { status: number; body: any } {
   hppDb.unshift(report);
   saveHppToDisk();
   bumpDataVersion();
+  emitCanonicalEvent({
+    source: data.senderPhone ? "wa-chat" : "dashboard", entity: "hpp", entityId: report.id,
+    action: "generate", actor: data.senderPhone,
+    payload: { farmerId: report.farmerId, komoditas: report.komoditas, musimTanam: report.musimTanam, totalBiayaRp: report.totalBiayaRp, volumePanenKg: report.volumePanenKg, hppPerKg: report.hppPerKg },
+  });
   return { status: 201, body: report };
 }
 
@@ -2415,7 +2529,7 @@ export function createServerApp() {
   });
 
   // GET 9Router Gateway status & model discovery
-  app.get("/api/9router/status", async (_req, res) => {
+  app.get("/api/9router/status", requireSession(), async (_req, res) => {
     const cfg = getNineRouterConfig();
     const health = await checkNineRouterHealth();
     let availableModels: string[] = [];
@@ -2465,7 +2579,7 @@ export function createServerApp() {
   });
 
   // GET Meta Model API status & model discovery
-  app.get("/api/meta/status", async (_req, res) => {
+  app.get("/api/meta/status", requireSession(), async (_req, res) => {
     const cfg = getMetaModelConfig();
     const health = await checkMetaModelHealth();
     let availableModels: string[] = [];
@@ -2501,7 +2615,7 @@ export function createServerApp() {
   });
 
   // GET Laya Intent Engine status
-  app.get("/api/laya/status", async (_req, res) => {
+  app.get("/api/laya/status", requireSession(), async (_req, res) => {
     const isCircuitOpen = Date.now() < layaUnavailableUntil;
     let sidecarHealthy = false;
     let sidecarData: any = null;
@@ -2557,7 +2671,7 @@ export function createServerApp() {
   });
 
   // POST test Laya decision endpoint
-  app.post("/api/laya/decide", async (req, res) => {
+  app.post("/api/laya/decide", requireSession(), async (req, res) => {
     const { text } = req.body || {};
     if (!text || typeof text !== "string") {
       return res.status(400).json({ error: "Text string is required" });
@@ -2576,7 +2690,7 @@ export function createServerApp() {
   });
 
   // GET all recognized admin numbers
-  app.get("/api/admins", (_req, res) => {
+  app.get("/api/admins", requireSession(), (_req, res) => {
     res.json(adminsDb);
   });
 
@@ -2609,8 +2723,60 @@ export function createServerApp() {
     return { ok: false, error: "Aksi ini butuh admin aktif (requesterNoHp) atau nomor pemilik data (senderPhone = noHp/kontak)." };
   }
 
+  // Auth sesi dashboard: setup password sekali, login/logout, identitas sesi.
+  app.post("/api/auth/setup-password", (req, res) => {
+    const { noHp, password } = req.body || {};
+    if (!noHp || !String(password || "").trim() || String(password).length < 8) {
+      return res.status(400).json({ error: "noHp + password ≥8 karakter wajib." });
+    }
+    const anyHash = adminsDb.some((a: any) => (a as any).passwordHash);
+    const target = findAdmin(noHp);
+    if (!target) return res.status(404).json({ error: "Admin tidak dikenal." });
+    if ((target as any).passwordHash) return res.status(400).json({ error: "Password sudah diset." });
+    if (anyHash) {
+      const s = readSession(req);
+      const me = s ? adminsDb.find((a) => a.id === s.adminId) : undefined;
+      if (!me || !me.aktif || me.role !== "ADMIN_UTAMA") {
+        return res.status(403).json({ error: "Hanya Admin Utama bersesi boleh mereset password." });
+      }
+    } else if (!requireRequesterAdmin(req.body).ok) {
+      return res.status(403).json({ error: "Butuh pengesah admin (migrasi satu-kali)." });
+    }
+    const salt = crypto.randomBytes(8).toString("hex");
+    (target as any).passwordHash = `${salt}:${crypto.scryptSync(String(password), salt, 32).toString("hex")}`;
+    saveAdminsToDisk();
+    return res.json({ success: true });
+  });
+  app.post("/api/auth/login", (req, res) => {
+    const { noHp, password } = req.body || {};
+    const adm = findAdmin(noHp);
+    const [salt, hash] = String((adm as any)?.passwordHash || "").split(":");
+    let ok = false;
+    try {
+      ok = !!adm && !!salt && !!hash && crypto.timingSafeEqual(
+        Buffer.from(hash, "hex"),
+        crypto.scryptSync(String(password || ""), salt, 32),
+      );
+    } catch { ok = false; }
+    if (!ok) return res.status(401).json({ error: "No HP / password salah." });
+    res.setHeader("Set-Cookie", `tani_sid=${mintSession(adm.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`);
+    return res.json({ success: true, nama: adm.nama, role: adm.role });
+  });
+  app.post("/api/auth/logout", (req, res) => {
+    const m = String(req.headers?.cookie || "").match(/tani_sid=([a-f0-9]{32})\./);
+    if (m) sessions.delete(m[1]);
+    res.setHeader("Set-Cookie", "tani_sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+    return res.json({ success: true });
+  });
+  app.get("/api/auth/me", (req, res) => {
+    const s = readSession(req);
+    const adm = s ? adminsDb.find((a) => a.id === s.adminId) : undefined;
+    if (!adm || !adm.aktif) return res.status(401).json({ error: "Belum login." });
+    return res.json({ id: adm.id, nama: adm.nama, role: adm.role, noHp: adm.noHp });
+  });
+
   // POST add new admin phone number
-  app.post("/api/admins", (req, res) => {
+  app.post("/api/admins", requireSession(), (req, res) => {
     const { nama, noHp, instansi, role, izinAkses } = req.body;
     if (!nama || !noHp) {
       return res.status(400).json({ error: "Nama dan nomor WhatsApp wajib diisi." });
@@ -2644,7 +2810,7 @@ export function createServerApp() {
   });
 
   // DELETE or deactivate admin phone number
-  app.delete("/api/admins/:id", (req, res) => {
+  app.delete("/api/admins/:id", requireSession(), (req, res) => {
     const { id } = req.params;
     if (id === "ADM-001") {
       return res.status(403).json({ error: "Super Admin utama tidak dapat dihapus." });
@@ -2667,12 +2833,12 @@ export function createServerApp() {
   });
 
   // GET all registered farmers
-  app.get("/api/farmers", (_req, res) => {
+  app.get("/api/farmers", requireSession(), (_req, res) => {
     res.json(farmersDb);
   });
 
   // POST add new farmer
-  app.post("/api/farmers", (req, res) => {
+  app.post("/api/farmers", requireSession(), (req, res) => {
     const data = req.body;
     const gateF = requireAdminOrSelf(data, data?.noHp);
     if (!gateF.ok) {
@@ -2713,11 +2879,16 @@ export function createServerApp() {
     farmersDb.unshift(newFarmer);
     saveFarmersToDisk();
     bumpDataVersion();
+    emitCanonicalEvent({
+      source: "dashboard", entity: "farmer", entityId: newFarmer.id,
+      action: "create", actor: (req as any).sessionAdmin?.noHp,
+      payload: { nama: newFarmer.nama, komoditas: newFarmer.komoditas, luasLahan: newFarmer.luasLahan, kabupaten: newFarmer.kabupaten, statusVerifikasi: newFarmer.statusVerifikasi },
+    });
     res.status(201).json(newFarmer);
   });
 
   // PUT update existing farmer
-  app.put("/api/farmers/:id", (req, res) => {
+  app.put("/api/farmers/:id", requireSession(), (req, res) => {
     const { id } = req.params;
     const data = req.body;
     const gate = requireRequesterAdmin(data);
@@ -2755,7 +2926,7 @@ export function createServerApp() {
   });
 
   // POST verify farmer status
-  app.post("/api/farmers/:id/verify", (req, res) => {
+  app.post("/api/farmers/:id/verify", requireSession(), (req, res) => {
     const { id } = req.params;
     const gateV = requireRequesterAdmin(req.body);
     if (!gateV.ok) {
@@ -2769,11 +2940,16 @@ export function createServerApp() {
     farmer.catatanAI = `Divalidasi langsung oleh Petugas PPL Lapangan pada ${new Date().toLocaleDateString("id-ID")}. Polygon dan berkas lahan lengkap.`;
     saveFarmersToDisk();
     bumpDataVersion();
+    emitCanonicalEvent({
+      source: "dashboard", entity: "farmer", entityId: farmer.id,
+      action: "verify", actor: (req as any).sessionAdmin?.noHp,
+      payload: { nama: farmer.nama, statusVerifikasi: farmer.statusVerifikasi },
+    });
     res.json({ success: true, farmer });
   });
 
   // DELETE farmer by ID
-  app.delete("/api/farmers/:id", (req, res) => {
+  app.delete("/api/farmers/:id", requireSession(), (req, res) => {
     const { id } = req.params;
     const gate = requireRequesterAdmin(req.body);
     if (!gate.ok) {
@@ -2790,12 +2966,12 @@ export function createServerApp() {
   });
 
   // GET all agricultural suppliers / kiosks / offtakers
-  app.get("/api/suppliers", (_req, res) => {
+  app.get("/api/suppliers", requireSession(), (_req, res) => {
     res.json(suppliersDb);
   });
 
   // POST add new supplier / saprodi partner
-  app.post("/api/suppliers", (req, res) => {
+  app.post("/api/suppliers", requireSession(), (req, res) => {
     const data = req.body;
     const gateS = requireAdminOrSelf(data, data?.kontak);
     if (!gateS.ok) {
@@ -2805,12 +2981,12 @@ export function createServerApp() {
       return res.status(400).json({ error: "Nama supplier/kios wajib diisi." });
     }
 
-    const newSupplier = saveSupplierRecord(data);
+    const newSupplier = saveSupplierRecord(data, (req as any).sessionAdmin, data?.kontak, "dashboard");
     res.status(201).json(newSupplier);
   });
 
   // PUT update supplier
-  app.put("/api/suppliers/:id", (req, res) => {
+  app.put("/api/suppliers/:id", requireSession(), (req, res) => {
     const { id } = req.params;
     const data = req.body;
     const gate = requireRequesterAdmin(data);
@@ -2849,7 +3025,7 @@ export function createServerApp() {
   });
 
   // DELETE supplier by ID
-  app.delete("/api/suppliers/:id", (req, res) => {
+  app.delete("/api/suppliers/:id", requireSession(), (req, res) => {
     const { id } = req.params;
     const gate = requireRequesterAdmin(req.body);
     if (!gate.ok) {
@@ -2866,7 +3042,7 @@ export function createServerApp() {
   });
 
   // GET CSV export for suppliers (Google Sheets Lembar 2)
-  app.get("/api/sheets/suppliers/export.csv", (_req, res) => {
+  app.get("/api/sheets/suppliers/export.csv", requireSession(), (_req, res) => {
     const headers = [
       "ID Supplier",
       "Waktu Terdaftar",
@@ -2912,7 +3088,7 @@ export function createServerApp() {
   });
 
   // GET Google Maps Platform API key config
-  app.get("/api/config/maps-key", (_req, res) => {
+  app.get("/api/config/maps-key", requireSession(), (_req, res) => {
     const apiKey =
       process.env.VITE_GOOGLE_MAPS_API_KEY ||
       process.env.GOOGLE_MAPS_API_KEY ||
@@ -2921,7 +3097,7 @@ export function createServerApp() {
   });
 
   // GET Agronomy Fertilizer Recommendation
-  app.get("/api/agronomy/fertilizer", (req, res) => {
+  app.get("/api/agronomy/fertilizer", requireSession(), (req, res) => {
     const crop = (req.query.crop as string) || "Padi";
     const ha = parseFloat(req.query.ha as string) || 1.0;
     const result = calculateFertilizerRecommendation(crop, ha);
@@ -2929,7 +3105,7 @@ export function createServerApp() {
   });
 
   // POST Audio Transcribe & Entity Extraction (Multimodal AI)
-  app.post("/api/audio-transcribe", async (req, res) => {
+  app.post("/api/audio-transcribe", requireSession(), async (req, res) => {
     try {
       const { audioBase64, mimeType, senderPhone } = req.body;
       if (!audioBase64) {
@@ -3040,13 +3216,13 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
 
   // ============ ERP Fase 5: Kas Tani ============
   // POST catat transaksi kas (tulis wajib identitas dikenal)
-  app.post("/api/cash", (req, res) => {
+  app.post("/api/cash", requireSession(), (req, res) => {
     const r = processCashEntry(req.body || {});
     res.status(r.status).json(r.body);
   });
 
   // GET daftar transaksi kas (baca: petani difilter miliknya, dashboard semua)
-  app.get("/api/cash", (req, res) => {
+  app.get("/api/cash", requireSession(), (req, res) => {
     const q = req.query as any;
     const scope = resolveErpScope(q.senderPhone);
     let rows = [...cashDb];
@@ -3063,7 +3239,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // GET ringkasan saldo kas per petani
-  app.get("/api/cash/summary", (req, res) => {
+  app.get("/api/cash/summary", requireSession(), (req, res) => {
     const q = req.query as any;
     const scope = resolveErpScope(q.senderPhone);
     const farmerId = scope.farmerId || q.farmerId;
@@ -3078,13 +3254,13 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
 
   // ============ ERP Fase 5: Stok Kios ============
   // POST catat mutasi stok (kios pemilik atau admin)
-  app.post("/api/stock", (req, res) => {
+  app.post("/api/stock", requireSession(), (req, res) => {
     const r = processStockEntry(req.body || {});
     res.status(r.status).json(r.body);
   });
 
   // GET daftar mutasi stok
-  app.get("/api/stock", (req, res) => {
+  app.get("/api/stock", requireSession(), (req, res) => {
     const q = req.query as any;
     const scope = resolveErpScope(q.senderPhone);
     let rows = [...stockDb];
@@ -3099,7 +3275,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // GET saldo stok per kios (per produk + satuan)
-  app.get("/api/stock/saldo", (req, res) => {
+  app.get("/api/stock/saldo", requireSession(), (req, res) => {
     const q = req.query as any;
     const scope = resolveErpScope(q.senderPhone);
     const supplierId = scope.supplierId || q.supplierId;
@@ -3111,13 +3287,13 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
 
   // ============ ERP Fase 5: HPP Komoditas ============
   // POST generate laporan HPP dari transaksi kas
-  app.post("/api/hpp/generate", (req, res) => {
+  app.post("/api/hpp/generate", requireSession(), (req, res) => {
     const r = processHppGenerate(req.body || {});
     res.status(r.status).json(r.body);
   });
 
   // GET daftar laporan HPP
-  app.get("/api/hpp", (req, res) => {
+  app.get("/api/hpp", requireSession(), (req, res) => {
     const q = req.query as any;
     const scope = resolveErpScope(q.senderPhone);
     let rows = [...hppDb];
@@ -3130,7 +3306,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // GET ekspor CSV kas tani (Lembar 3)
-  app.get("/api/sheets/cash/export.csv", (req, res) => {
+  app.get("/api/sheets/cash/export.csv", requireSession(), (req, res) => {
     const q = req.query as any;
     const scope = resolveErpScope(q.senderPhone);
     let rows = [...cashDb];
@@ -3148,7 +3324,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // GET ekspor CSV stok kios (Lembar 4)
-  app.get("/api/sheets/stock/export.csv", (req, res) => {
+  app.get("/api/sheets/stock/export.csv", requireSession(), (req, res) => {
     const q = req.query as any;
     const scope = resolveErpScope(q.senderPhone);
     let rows = [...stockDb];
@@ -3370,6 +3546,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
 
   app.post(
     "/api/upload",
+    requireSession(),
     (req, res, next) => {
       dinasUpload.single("file")(req as any, res as any, (err: any) => {
         if (err) {
@@ -3532,7 +3709,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // POST simulate or update commodity price
-  app.post("/api/commodities/update", (req, res) => {
+  app.post("/api/commodities/update", requireSession(), (req, res) => {
     const gate = requireRequesterAdmin(req.body);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
@@ -3581,7 +3758,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // POST broadcast anomaly notification to farmers
-  app.post("/api/notifications/broadcast", (req, res) => {
+  app.post("/api/notifications/broadcast", requireSession(), (req, res) => {
     const gate = requireRequesterAdmin(req.body);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
@@ -3618,7 +3795,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // GET notifications list
-  app.get("/api/notifications", (_req, res) => {
+  app.get("/api/notifications", requireSession(), (_req, res) => {
     res.json(notificationsDb);
   });
 
@@ -3628,7 +3805,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // POST generate strategic recommendation via AI with smart caching
-  app.post("/api/strategic-recommendation/generate", async (req, res) => {
+  app.post("/api/strategic-recommendation/generate", requireSession(), async (req, res) => {
     const nineCfg = getNineRouterConfig();
     const ai = getGemini();
 
@@ -3957,7 +4134,20 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     const { history, currentDraft, currentSupplierDraft, currentCashDraft, currentStockDraft, currentHppDraft, senderPhone } = raw;
     const ai = getGemini();
 
-    const activeAdmin = findAdmin(senderPhone);
+    // Gerbang ganda: sesi dashboard ATAU forwarder resmi. Self-assert mentah ditolak.
+    const fwdSecret = (process.env.FORWARD_SECRET || "").trim();
+    const fwdOk = !!fwdSecret && String(req.headers["x-tani-forward-secret"] || "") === fwdSecret;
+    const sessAdm = (() => {
+      const s = readSession(req);
+      return s ? adminsDb.find((a) => a.id === s.adminId && a.aktif) : undefined;
+    })();
+    if (!sessAdm && !fwdOk) {
+      console.log(`[Chat Gate] 401 non-sesi/non-forwarder (phone=${senderPhone || "?"} msg=${String(message || "").slice(0, 60)})`);
+      return res.status(401).json({ reply: "Sesi dashboard berakhir atau pemanggil tak dikenal.", isComplete: true });
+    }
+    const effPhone = sessAdm ? sessAdm.noHp : senderPhone; // sesi: identitas = admin login
+
+    const activeAdmin = findAdmin(effPhone);
     const isAdmin = !!activeAdmin;
 
     // Laya intent lazy: regex dulu (0ms), sidecar hanya saat regex miss.
@@ -4016,7 +4206,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         const erpRes = await handleErpChat({
           intent: erpIntent,
           message,
-          senderPhone,
+          senderPhone: effPhone,
           cashDraft: cashDraftIn,
           stockDraft: stockDraftIn,
           hppDraft: hppDraftIn,
@@ -4057,7 +4247,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       const check = checkSupplierCompleteness(merged);
 
       if (check.isComplete && (isAddAction || isSupplierMsg)) {
-        const saved = saveSupplierRecord(merged, activeAdmin, activeAdmin?.noHp || senderPhone);
+        const saved = saveSupplierRecord(merged, activeAdmin, activeAdmin?.noHp || effPhone, "wa-chat");
         return res.json({
           reply: formatSuccessSupplierRegistration(saved, activeAdmin),
           quickReplies: [
@@ -4174,7 +4364,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         const isAttemptingAdminAction = forbiddenAdminKeywords.some((keyword) => lower.includes(keyword));
 
         if (isAttemptingAdminAction) {
-          const maskedPhone = senderPhone ? senderPhone : "nomor Anda";
+          const maskedPhone = effPhone ? effPhone : "nomor Anda";
           return res.json({
             reply: `🔒 *Akses Dibatasi - Perlindungan Privasi Data Petani*\n\nMohon maaf Bpk/Ibu, nomor Anda (*${maskedPhone}*) terdeteksi sebagai *Petani Mitra* (bukan nomor admin resmi).\n\nDemi menjaga kerahasiaan data lahan dan kontak kelompok tani, fitur rekapitulasi database, daftar kontak petani lain, serta penarikan data administratif *hanya dapat diakses oleh Nomor Admin & Petugas PPL Terdaftar* (Dinas Ketahanan Pangan & Pertanian).\n\n💡 *Layanan WhatsApp yang dapat Bapak/Ibu nikmati:* \n1. 🌾 *Daftarkan Lahan Anda* (masuk otomatis ke database Google Sheets resmi)\n2. 📈 *Cek Harga Pasar Terkini* & anomali harga komoditas\n3. 💡 *Konsultasi Hama & Pemupukan*\n4. 📋 *Cek Status Pendaftaran Lahan Sendiri*`,
             extracted: currentDraft || {},
@@ -4379,7 +4569,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       // If user asks to add or provides farmer registration details
       if (isAddIntent) {
         if (check.isComplete) {
-          const newRecord = saveFarmerRecord(extracted, undefined, senderPhone);
+          const newRecord = saveFarmerRecord(extracted, undefined, effPhone);
           return res.json({
             reply: formatSuccessFarmerRegistration(newRecord),
             extracted: newRecord,
@@ -4510,7 +4700,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         // Only save when ALL required fields are complete!
         if (isAddRequest || parsed.isComplete) {
           if (check.isComplete) {
-            const newRecord = saveFarmerRecord(merged, undefined, senderPhone);
+            const newRecord = saveFarmerRecord(merged, undefined, effPhone);
             parsed.savedRecord = newRecord;
             parsed.extracted = newRecord;
             parsed.isComplete = true;
@@ -4563,7 +4753,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
     if (isAddRequest || reg.hasMinimumData) {
       if (check.isComplete) {
-        const newRecord = saveFarmerRecord(extracted, undefined, senderPhone);
+        const newRecord = saveFarmerRecord(extracted, undefined, effPhone);
         return res.json({
           reply: formatSuccessFarmerRegistration(newRecord),
           extracted: newRecord,
@@ -4754,7 +4944,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // Test Ping Endpoint for Webhook Verification UI
-  app.post("/api/webhook/test-ping", (_req, res) => {
+  app.post("/api/webhook/test-ping", requireSession(), (_req, res) => {
     const timestamp = new Date().toISOString().replace("T", " ").substring(0, 19);
     const logItem = {
       id: `wh-ping-${Date.now()}`,
@@ -4775,7 +4965,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // GET Webhook Logs
-  app.get("/api/webhook/logs", (_req, res) => {
+  app.get("/api/webhook/logs", requireSession(), (_req, res) => {
     res.json(webhookLogs);
   });
 
@@ -4787,8 +4977,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     const cashRows = cashDb.filter((c) => c.farmerId === f.id);
     const biaya = cashRows.filter((c) => c.jenis === "KELUAR").reduce((s, c) => s + c.jumlahRp, 0);
     const hppn = hppDb.filter((h) => h.farmerId === f.id);
-    const hp = String(f.noHp || "");
-    const masked = hp.length > 4 ? hp.slice(0, -4).replace(/[0-9]/g, "•") + hp.slice(-4) : "••••";
+    const masked = maskPhone(f.noHp);
     const fmtRp = (n: number) => "Rp" + Number(n || 0).toLocaleString("id-ID");
     const steps = [
       { t: "Didata", d: `${f.timestamp} — via ${f.googleSheetRow ? "Sheets baris #" + f.googleSheetRow : "aplikasi"}` },
@@ -4811,7 +5000,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
     if (mode === "subscribe" && token === verifyToken) {
       console.log("WhatsApp Webhook verified successfully.");
-      return res.status(200).send(challenge);
+      return res.status(200).type("text/plain").send(String(challenge ?? ""));
     }
     return res.status(403).send("Verification token mismatch");
   });
@@ -4888,7 +5077,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         const { extracted } = extractFarmerFromText(clean, {});
         const check = checkFarmerCompleteness({ ...extracted, noHp: from || extracted.noHp });
         if (check.isComplete) {
-          const saved = saveFarmerRecord({ ...extracted, noHp: from || extracted.noHp });
+          const saved = saveFarmerRecord({ ...extracted, noHp: from || extracted.noHp }, undefined, from, "wa-webhook");
           console.log(`[WA] petani tersimpan ${saved.id} dari ${from}`);
         } else {
           console.log(`[WA] draf masuk dari ${from}: ${check.missingFields.join(", ")}`);
@@ -4904,7 +5093,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // Korelasi Pearson luas vs ton (stdlib, tanpa dep).
-  app.get("/api/analytics/correlation", (_req, res) => {
+  app.get("/api/analytics/correlation", requireSession(), (_req, res) => {
     const xs = farmersDb.map((f) => Number(f.luasLahan) || 0);
     const ys = farmersDb.map((f) => Number(f.estimasiHasilTon) || 0);
     const n = xs.length;
@@ -4918,7 +5107,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // Simulasi intervensi Dinas (resapan gudang, CAS 30-45 hari, subsidi ongkir, OP murah).
-  app.post("/api/interventions/simulate", (req, res) => {
+  app.post("/api/interventions/simulate", requireSession(), (req, res) => {
     const b = req.body || {};
     const ton = Number(b.estimasiTon || farmersDb.reduce((a, f) => a + (f.estimasiHasilTon || 0), 0));
     const harga = Number(b.hargaKg || 12000);
@@ -4934,7 +5123,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // Broadcast hama khusus (template + endpoint sendiri).
-  app.post("/api/notifications/pest-broadcast", (req, res) => {
+  app.post("/api/notifications/pest-broadcast", requireSession(), (req, res) => {
     const gate = requireRequesterAdmin(req.body);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
@@ -4959,7 +5148,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // CSV Export for Google Sheets
-  app.get("/api/sheets/export.csv", (_req, res) => {
+  app.get("/api/sheets/export.csv", requireSession(), (_req, res) => {
     const headers = [
       "ID",
       "Waktu Pencatatan",
@@ -5008,7 +5197,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // Standalone Google Sheets Live View Web Page with authentic spreadsheet UI & interaction
-  app.get("/api/sheets/live-view", (req, res) => {
+  app.get("/api/sheets/live-view", requireSession(), (req, res) => {
     const totalLuas = farmersDb.reduce((acc, f) => acc + (f.luasLahan || 0), 0).toFixed(1);
     const totalTon = farmersDb.reduce((acc, f) => acc + (f.estimasiHasilTon || 0), 0).toFixed(1);
     const protoRaw = String(req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
@@ -5278,7 +5467,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // AI Cost Optimization & Metrics endpoint
-  app.get("/api/ai/metrics", (_req, res) => {
+  app.get("/api/ai/metrics", requireSession(), (_req, res) => {
     res.json({
       totalCacheHits,
       totalTokensSavedEstimate,
@@ -5290,7 +5479,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // Explicit cancellation endpoint
-  app.post("/api/chat/cancel", (_req, res) => {
+  app.post("/api/chat/cancel", requireSession(), (_req, res) => {
     console.log("[AI Cost Optimizer] Client requested explicit cancellation.");
     res.json({ ok: true, message: "Proses AI dibatalkan untuk menghemat token." });
   });
@@ -5299,8 +5488,9 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 }
 
 async function startServer() {
+  loadEventsDb();
   const app = createServerApp();
-  const PORT = 3000;
+  const PORT = process.env.SMOKE_PORT ? Number(process.env.SMOKE_PORT) : 3000;
 
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");

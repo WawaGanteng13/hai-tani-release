@@ -1,9 +1,9 @@
 # Backend Schema Documentation (BSD)
 ## Hai Tani (Data Schemas, REST API Contracts & Integrations)
 
-**Versi Dokumen:** 1.0.0  
-**Tanggal Rilis:** Oktober 2026  
-**Status:** Approved  
+**Versi Dokumen:** 1.1.0  
+**Tanggal Rilis:** Oktober 2026 (Amandemen Audit Hardening)  
+**Status:** Approved — Tambah Skema ERP, Auth & Log Kanonis  
 
 ---
 
@@ -74,7 +74,56 @@ export interface AdminUser {
 }
 ```
 
-#### 1.4 Skema Indeks Harga Pasar Komoditas (`MarketCommodity`)
+#### 1.5 Skema ERP Fase 5 (Kas, Stok, HPP)
+
+```typescript
+export interface CashTransaction {
+  id: string;                    // "KAS-0001" via nextId (single source ./lib/next-id)
+  farmerId: string;              // pemilik; petani hanya miliknya sendiri (403 bila bukan)
+  tanggal: string;               // ISO YYYY-MM-DD
+  jenis: 'MASUK' | 'KELUAR';
+  kategori: string;              // divalidasi silang: MASUK ⊂ [Penjualan Panen, Subsidi/Bantuan, Pinjaman, Lainnya]
+                                 // KELUAR ⊂ [Benih, Pupuk, Pestisida, Upah Tenaga, Sewa Lahan/Alat, Transportasi, Irigasi/BBM, Cicilan, Lainnya]
+  jumlahRp: number;              // integer > 0 (parser ID: "1.500.000" → 1500000)
+  komoditas?: string; musimTanam?: string; // "MT-2026-1"
+  catatan?: string;              // sanitizeText 500
+  dicatatOleh: string;           // senderPhone / "dashboard"
+  waktuCatat: string;            // ISO; anti-duplikat 5 mnt (farmer+jenis+kategori+nominal+tanggal)
+  googleSheetRow?: number;       // via nextSheetRow
+  syncStatus?: string;
+}
+export interface StockMutation {
+  id: string;                    // "STM-0001"
+  supplierId: string;            // pemilik; kios hanya miliknya sendiri
+  produk: string;                // sanitizeText 80
+  satuan: string;                // ⊂ [kg, gram, liter, ml, sak, botol, bungkus, pak, unit]
+  arah: 'MASUK' | 'KELUAR' | 'PENYESUAIAN'; // PENYESUAIAN: qty boleh negatif (koreksi)
+  qty: number;                   // > 0 (kecuali PENYESUAIAN); KELUAR ditolak bila saldo negatif
+  hargaSatuanRp?: number;
+  tanggal: string; keterangan?: string; dicatatOleh: string;
+  waktuCatat: string; googleSheetRow?: number;
+}
+export interface HppReport {
+  id: string;                    // "HPP-0001"
+  farmerId: string; komoditas?: string; musimTanam?: string;
+  totalBiayaRp: number;           // Σ KELUAR terfilter (400 bila nol)
+  totalPendapatanRp: number;      // Σ MASUK kategori "Penjualan Panen"
+  biayaPerKategori: Record<string, number>;
+  volumePanenKg: number;         // > 0
+  hppPerKg: number;              // totalBiaya/volume, 2 desimal
+  hargaJualPerKg?: number;       // ≥ 0
+  marginPerKg?: number; marginPersen?: number; // (harga-hpp)/harga*100
+  generatedAt: string; generatedBy: string;
+}
+```
+
+#### 1.6 Skema Sesi & Auth Dashboard
+* `AdminUser.passwordHash?: string` — format `salt:scryptHex` (scrypt 32B, Node built-in).
+* Cookie `tani_sid = <sid>.<hmac-sha256(sid)>` — `HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`; store in-memory + sliding expiry 12 jam; kunci di `DATA_DIR/.session-key` (0600).
+* Endpoint: `POST /api/auth/setup-password` (migrasi satu-kali / reset oleh ADMIN_UTAMA bersesi) → `POST /api/auth/login` → `GET /api/auth/me` → `POST /api/auth/logout`.
+* `/api/chat` gerbang ganda: sesi dashboard ATAU header `x-tani-forward-secret` (forwarder resmi); self-assert mentah → 401. Identitas efektif (`effPhone`) = noHp admin sesi bila bersesi.
+
+#### 1.7 Skema Indeks Harga Pasar Komoditas (`MarketCommodity`)
 
 ```typescript
 export interface MarketCommodity {
@@ -97,6 +146,7 @@ export interface MarketCommodity {
 
 #### 2.1 Chatbot WhatsApp AI
 * **Endpoint:** `POST /api/chat`
+* **Gerbang ganda (v1.1.0):** sesi dashboard (cookie `tani_sid`) ATAU header `x-tani-forward-secret` (forwarder resmi). Tanpa keduanya → 401. `senderPhone` body hanya dipercaya dari forwarder; dari dashboard diganti identitas admin sesi (`effPhone`).
 * **Request Body:**
   ```json
   {
@@ -147,3 +197,30 @@ export interface MarketCommodity {
 * **Endpoint:** `POST /api/webhook/farmer-registration`
 * **Fungsi:** Menerima payload pendaftaran dari WhatsApp Business Gateway eksternal (Twilio, Baileys, WhatsApp Cloud API) atau pemicu Google Apps Script.
 * **Autentikasi Header:** `X-TaniAI-Signature: sha256_hash`
+* **Reply loop v2 (1.1.0, file `api/webhook/whatsapp.ts` di-deploy ke Vercel):** forwarder mem-pipe body mentah ke backend dan paralel memanggil `POST /api/chat` (header `x-tani-forward-secret`), lalu mengirim `reply` via Meta Graph API (`WHATSAPP_TOKEN` + `PHONE_NUMBER_ID` di env Vercel). Hanya pesan pengguna (abaikan `statuses` + nomor sendiri sebagai anti-loop; batas 4000 karakter); gagal reply tidak menggagalkan webhook; balasan error gerbang tidak diteruskan.
+
+---
+
+### 4. Log Kanonis Berversi (sumber data training)
+JSON runtime tetap system of record operasional; untuk ML, setiap tulis domain
+**wajib** memancarkan event append-only (file `events_db.json` / tujuan setara):
+
+```typescript
+export interface CanonicalEvent {
+  eventId: string;               // "EVT-<yyyymmdd>-<seq>"
+  ts: string;                    // ISO-8601 waktu catat server
+  source: 'wa-chat' | 'wa-webhook' | 'dashboard' | 'import' | 'system';
+  entity: 'farmer' | 'supplier' | 'cash' | 'stock' | 'hpp' | 'admin' | 'commodity';
+  entityId: string;              // id record terkait
+  action: 'create' | 'update' | 'verify' | 'delete' | 'generate';
+  actor: string;                 // noHp admin sesi / nomor WA / "system"
+  payload: Record<string, unknown>; // snapshot field relevan (PII termasking)
+  schemaV: 1;                    // versi skema — naikkan bila bentuk payload berubah
+}
+```
+Aturan: PII (`noHp` penuh, koordinat presisi) **tidak** masuk payload — hanya versi mask. Konsumen training membaca log ini, bukan JSON mentah.
+
+### 5. Endpoint Auth (v1.1.0)
+* `POST /api/auth/setup-password` `{noHp, password≥8}` — sekali per admin (migrasi) / reset oleh ADMIN_UTAMA bersesi.
+* `POST /api/auth/login` → Set-Cookie `tani_sid`; `GET /api/auth/me`; `POST /api/auth/logout`.
+* Seluruh route tulis + baca-PII kini memakai middleware `requireSession()` (401 bila tanpa sesi).
