@@ -322,10 +322,17 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
 
   // 1. Nama Petani
   const nameMatch =
-    text.match(/(?:nama\s*(?:saya|petani)?\s*(?:adalah|:)?\s*|petani\s+|pak\s+|bu\s+|bapak\s+|ibu\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/i) ||
-    text.match(/(?:nama\s*:\s*)([A-Za-z\s]+?)(?:,|\.|\n|$)/i);
+    text.match(/(?:nama\s*(?:saya|petani)?\s*(?:adalah|:)?\s*|petani\s+|pak\s+|bu\s+|bapak\s+|ibu\s+)([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)*)/i) ||
+    text.match(/(?:nama\s*:\s*)([A-Za-z \t]+?)(?:,|\.|\n|$)/i);
   if (nameMatch && nameMatch[1] && nameMatch[1].trim().length > 2) {
-    const raw = nameMatch[1].trim().replace(/^(?:bernama|nama)\s+/i, "").replace(/^[:\-,\s]+/, "").trim();
+    let raw = nameMatch[1].trim().replace(/^(?:bernama|nama)\s+/i, "").replace(/^[:\-,\s]+/, "").trim();
+    const NAME_STOP = new Set(["komoditas", "luas", "lahan", "lokasi", "desa", "kelurahan", "kecamatan", "kabupaten", "kota", "alamat", "wilayah", "hp", "wa", "telepon", "telp", "no", "varietas", "benih", "bibit", "panen", "ton", "kuintal", "hektar", "hektare", "meter"]);
+    const nameWords: string[] = [];
+    for (const w of raw.split(/\s+/)) {
+      if (NAME_STOP.has(w.toLowerCase().replace(/[^a-z]/g, ""))) break;
+      nameWords.push(w);
+    }
+    raw = nameWords.join(" ").trim();
     if (raw.length > 2 && !["saya", "petani", "tani", "mitra", "baru", "lahan", "data", "semua", "rekap"].includes(raw.toLowerCase())) {
       const lowerRaw = raw.toLowerCase();
       if (lowerRaw.startsWith("pak ") || lowerRaw.startsWith("bapak ")) {
@@ -355,20 +362,43 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
     ext.komoditas = "Tomat";
   } else if (lower.includes("kentang")) {
     ext.komoditas = "Kentang";
+  } else if (lower.includes("apel")) {
+    ext.komoditas = "Apel";
+  } else if (lower.includes("melon") || lower.includes("semangka")) {
+    ext.komoditas = "Melon";
+  } else if (lower.includes("kopi")) {
+    ext.komoditas = "Kopi";
+  } else if (lower.includes("kakao") || lower.includes("coklat")) {
+    ext.komoditas = "Kakao";
+  } else if (lower.includes("tebu")) {
+    ext.komoditas = "Tebu";
+  } else if (lower.includes("kelapa") || lower.includes("kopra")) {
+    ext.komoditas = "Kelapa";
+  }
+  if (!ext.komoditas) {
+    const komMatch = text.match(/komoditas(?:\s+tanaman)?\s*:?\s*([A-Za-z][A-Za-z \t]*?)(?:,|\.|\n|$)/i);
+    if (komMatch && komMatch[1]) {
+      const cand = komMatch[1].trim().replace(/\s+/g, " ");
+      if (cand.length >= 3 && !/^(tanaman|utama|tani|belum|tidak|ada|yang|dan)$/i.test(cand)) {
+        ext.komoditas = cand.charAt(0).toUpperCase() + cand.slice(1).toLowerCase();
+      }
+    }
   }
 
   // 3. Luas Lahan
-  const areaMatch =
-    text.match(/(\d+(?:[.,]\d+)?)\s*(?:ha|hektar|hektare)/i) ||
-    text.match(/(\d+(?:[.,]\d+)?)\s*(?:m2|m²|meter\s*persegi)/i) ||
-    text.match(/(\d+(?:[.,]\d+)?)\s*(?:bahu|ubin)/i);
+  const areaMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(ha|hektar(?:e)?|m2|m²|meter\s*persegi|bahu|ubin|m(?:eter)?s?)\b/i);
   if (areaMatch && areaMatch[1]) {
-    let num = parseFloat(areaMatch[1].replace(",", "."));
-    if (text.match(/m2|m²|meter\s*persegi/i)) {
+    const rawNum = areaMatch[1];
+    let num: number;
+    if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(rawNum)) num = parseFloat(rawNum.replace(/\./g, "").replace(",", "."));
+    else if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(rawNum)) num = parseFloat(rawNum.replace(/,/g, ""));
+    else num = parseFloat(rawNum.replace(",", "."));
+    const unit = (areaMatch[2] || "").toLowerCase();
+    if (/^m/.test(unit)) {
       num = Number((num / 10000).toFixed(2));
-    } else if (text.match(/bahu/i)) {
+    } else if (unit === "bahu") {
       num = Number((num * 0.7).toFixed(2));
-    } else if (text.match(/ubin/i)) {
+    } else if (unit === "ubin") {
       num = Number(((num * 14) / 10000).toFixed(2));
     }
     ext.luasLahan = num;
@@ -385,7 +415,8 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
   const knownCities = [
     "Karawang", "Subang", "Garut", "Kediri", "Brebes", "Magetan", "Indramayu", "Cianjur", "Majalengka",
     "Boyolali", "Ngawi", "Nganjuk", "Banyuwangi", "Malang", "Klaten", "Sragen", "Temanggung", "Wonosobo",
-    "Bandung", "Bogor", "Sukabumi", "Cirebon", "Sumedang", "Purwakarta", "Tasikmalaya", "Ciamis", "Kuningan"
+    "Bandung", "Bogor", "Sukabumi", "Cirebon", "Sumedang", "Purwakarta", "Tasikmalaya", "Ciamis", "Kuningan",
+    "Batu", "Blitar", "Madiun", "Pasuruan", "Probolinggo", "Jember", "Mojokerto", "Jombang", "Tuban", "Bojonegoro"
   ];
   for (const city of knownCities) {
     if (lower.includes(city.toLowerCase())) {
@@ -398,9 +429,10 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
   if (desaMatch && desaMatch[1]) {
     ext.alamat = `Desa ${desaMatch[1]}${ext.kabupaten ? `, ${ext.kabupaten}` : ""}`;
   }
-  const diMatch = text.match(/(?:\bdi\s+|\blokaksi\s+|\bwilayah\s+|\bkabupaten\s+|\bkab\.?\s+)([A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+  const diMatch = text.match(/(?:\bdi\s+|\blokasi\s+|\bwilayah\s+|\bkabupaten\s+|\bkab\.?\s+)([A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
   if (diMatch && diMatch[1] && !ext.kabupaten) {
-    const candidate = diMatch[1].trim().replace(/^(desa|kelurahan|kecamatan)\s+/i, "");
+    const candidate = diMatch[1].trim().replace(/^(desa|kelurahan|kecamatan)\s+/i, "")
+      .split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
     if (candidate.length >= 3 && !["sawah", "lahan", "kebun", "desa", "sini", "sana", "dinas", "google", "sheets", "database", "rumah", "ladang", "pasar", "kios", "toko", "kantor", "jalan", "masjid"].includes(candidate.toLowerCase())) {
       ext.kabupaten = candidate;
       if (!ext.alamat) ext.alamat = `Desa Binaan, ${candidate}`;
