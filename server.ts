@@ -1150,17 +1150,13 @@ function parseRupiah(text: string): number | undefined {
   const mult: Record<string, number> = { miliar: 1e9, milyar: 1e9, juta: 1e6, jt: 1e6, ribu: 1e3, rb: 1e3 };
   const m = t.match(/([\d][\d.,]*)\s*(miliar|milyar|juta|jt|ribu|rb)\b/);
   if (m) {
-    let num = m[1];
-    if (num.includes(",")) num = num.replace(/\./g, "").replace(",", ".");
-    const n = parseFloat(num);
-    if (Number.isFinite(n) && n > 0) return Math.round(n * (mult[m[2]] || 1));
+    const n = parseIdNumber(m[1]);
+    if (n !== undefined) return Math.round(n * (mult[m[2]] || 1));
   }
   const rp = t.match(/\brp\b\.?\s*([\d][\d.,]*)/);
   if (rp) {
-    let num = rp[1];
-    if (num.includes(",")) num = num.replace(/\./g, "").replace(",", ".");
-    const n = parseFloat(num);
-    if (Number.isFinite(n) && n > 0) return Math.round(n);
+    const n = parseIdNumber(rp[1]);
+    if (n !== undefined) return Math.round(n);
   }
   const bare = [...t.matchAll(/[\d][\d.,]*/g)].map((x) => x[0]);
   if (bare.length === 1) {
