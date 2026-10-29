@@ -4923,6 +4923,24 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
 
     // IF SENDER IS ADMIN: Build Executive Agricultural Intelligence AI Assistant with Lean Targeted Context
     if (isAdmin) {
+      // Harga pasar live LANGSUNG (sebelum AI): budget chat forwarder <=8 dtk,
+      // percobaan AI yang gagal (Meta kosong -> 9Router -> fallback) menghabiskan
+      // budget sehingga balasan WA tidak terkirim sama sekali.
+      const lowerAdminMsgTop = (message || "").toLowerCase();
+      if (
+        /harga|anomali|inflasi|pasar/.test(lowerAdminMsgTop) &&
+        !/daftar|tambah|input|catat|simpan|masukkan/.test(lowerAdminMsgTop)
+      ) {
+        const liveReplyTop = await formatHargaPasarReply(message);
+        return res.json({
+          reply: liveReplyTop,
+          extracted: {},
+          isComplete: false,
+          isAdminAction: true,
+          aiProvider: "rule_based",
+          quickReplies: ["🌶️ Detail Petani Cabai", "🧅 Detail Petani Bawang", "📊 Rekap Semua Petani", "📥 Ekspor Sheets"],
+        });
+      }
       const leanContext = buildLeanTargetedContext(message, true);
 
       const adminSystemInstructions = `Anda adalah "Kang Tani AI - Executive Agricultural Intelligence Assistant", asisten AI resmi untuk dinas pertanian dan petugas PPL.
@@ -5055,23 +5073,6 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         } catch (err: any) {
           console.log("[Admin Chat] Parsing fallback triggered:", err?.message);
         }
-      }
-
-      // Harga pasar live untuk admin (gantikan data seed statis)
-      const lowerAdminMsg = (message || "").toLowerCase();
-      const isAdminPrice =
-        /harga|anomali|inflasi|pasar/.test(lowerAdminMsg) &&
-        !/daftar|tambah|input|catat|simpan|masukkan/.test(lowerAdminMsg);
-      if (isAdminPrice) {
-        const liveReply = await formatHargaPasarReply(message);
-        return res.json({
-          reply: liveReply,
-          extracted: {},
-          isComplete: false,
-          isAdminAction: true,
-          aiProvider: "rule_based",
-          quickReplies: ["🌶️ Detail Petani Cabai", "🧅 Detail Petani Bawang", "📊 Rekap Semua Petani", "📥 Ekspor Sheets"],
-        });
       }
 
       // Smart Dynamic Fallback for Admin

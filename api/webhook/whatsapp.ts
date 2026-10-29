@@ -162,6 +162,7 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
         chatP.catch(() => null),
         new Promise((res) => setTimeout(() => res(null), Math.max(0, remaining() - 500))),
       ]);
+      if (!chatJson) console.error("[wa-reply] chat kosong/timeout, balasan tidak dikirim");
       const reply = String((chatJson && chatJson.reply) || "").trim();
       // Jangan teruskan pesan error gerbang sebagai balasan WA.
       if (reply && !/sesi dashboard berakhir/i.test(reply) && remaining() > 1500) {
