@@ -4246,6 +4246,12 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     if (!isAdmin) return null;
     const lower = (message || "").toLowerCase();
 
+    // Registrasi ("mendaftarkan petani") mengandung "daftar"+"petani" — jangan
+    // biarkan analitik menyergapnya. Kecuali ada kualifikasi listing eksplisit.
+    const looksRegistration = /daft[a-z]*|tambah(kan)?|input|masukkan|catat|simpan/.test(lower);
+    const looksListing = /semua|seluruh|\blist\b|tampilkan|lihat|yang belum|rekap|total|berapa|ringkas|analisis|laporan|agregat/.test(lower);
+    if (looksRegistration && !looksListing) return null;
+
     const isAnalyticsIntent =
       (lower.includes("berapa") ||
         lower.includes("total") ||
