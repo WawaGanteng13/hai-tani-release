@@ -2338,7 +2338,7 @@ function processHppGenerate(data: any): { status: number; body: any } {
 
 export function createServerApp() {
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "1mb", verify: (req: any, _res: any, buf: Buffer) => { if (req.url?.startsWith("/api/webhook/whatsapp")) req.rawBody = buf; } }));
   // ponytail: header minimal tanpa dep; tambah helmet saat production.
   app.use((_req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -4788,6 +4788,31 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         if (got !== forwardSecret) {
           return res.status(403).json({ error: "Webhook hanya menerima penerusan resmi." });
         }
+      }
+      const appSecret = (process.env.WHATSAPP_APP_SECRET || "").trim();
+      const sig = String(req.headers["x-hub-signature-256"] || "");
+      const remoteOk = !!forwardSecret && String(req.headers["x-tani-forward-secret"] || "") === forwardSecret;
+      if (appSecret && !remoteOk) {
+        try {
+          const raw: Buffer | undefined = (req as any).rawBody;
+          if (!raw || !raw.length) {
+            return res.status(403).json({ error: "Verifikasi webhook gagal." });
+          }
+          const m = /^sha256=([a-f0-9]{64})$/i.exec(sig);
+          if (!m) {
+            return res.status(403).json({ error: "Tanda tangan webhook tidak valid." });
+          }
+          const expectedHex = crypto.createHmac("sha256", appSecret).update(raw).digest("hex");
+          const a = Buffer.from(m[1].toLowerCase(), "hex");
+          const b = Buffer.from(expectedHex, "hex");
+          if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+            return res.status(403).json({ error: "Tanda tangan webhook tidak valid." });
+          }
+        } catch {
+          return res.status(403).json({ error: "Verifikasi webhook gagal." });
+        }
+      } else if (!forwardSecret && !appSecret) {
+        console.warn("[WA] webhook tanpa signature/secret — mode kompatibilitas prod (set FORWARD_SECRET/WHATSAPP_APP_SECRET untuk menutup).");
       }
       const body = req.body || {};
       const entry = body?.entry?.[0]?.changes?.[0]?.value;
