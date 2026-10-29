@@ -125,7 +125,8 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
   const chatP: Promise<any> = inc
     ? (async () => {
         const chatCtl = new AbortController();
-        const chatT = setTimeout(() => chatCtl.abort(), 5000);
+        const chatBudget = Math.max(1500, Math.min(8000, remaining() - 1500));
+        const chatT = setTimeout(() => chatCtl.abort(), chatBudget);
         try {
           const chatRes = await fetch(backend + "/api/chat", {
             method: "POST",

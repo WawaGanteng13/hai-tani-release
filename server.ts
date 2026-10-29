@@ -1247,6 +1247,40 @@ function isQuerySafeToCache(message: string): boolean {
   return !mutationKeywords.some((k) => lower.includes(k));
 }
 
+// LLM kadang membungkus ganda ("reply": "{...}") atau terpotong di tengah JSON.
+// Kembalikan teks balasan bersih; input non-JSON dikembalikan apa adanya.
+function unwrapNestedReply(text: string): string {
+  const t = String(text || "");
+  const s = t.trim();
+  if (!s.startsWith("{")) return t;
+  try {
+    const inner = JSON.parse(s);
+    if (inner && typeof inner.reply === "string") return unwrapNestedReply(inner.reply);
+    return t;
+  } catch {
+    // JSON terpotong: ambil nilai "reply" hingga kutip penutup ATAU akhir string.
+    const m = s.match(/"reply"\s*:\s*"/);
+    if (!m || m.index === undefined) return t;
+    let raw = "";
+    let esc = false;
+    for (let i = m.index + m[0].length; i < s.length; i++) {
+      const c = s[i];
+      if (esc) { raw += "\\" + c; esc = false; continue; }
+      if (c === "\\") { esc = true; continue; }
+      if (c === '"') break;
+      raw += c;
+    }
+    if (esc) raw += "\\";
+    try {
+      const unesc = JSON.parse('"' + raw + '"');
+      return String(unesc).trim() ? String(unesc) : t;
+    } catch {
+      const manual = raw.replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      return manual.trim() ? manual : t;
+    }
+  }
+}
+
 // Rate limiter stdlib (tanpa dep). ponytail: ganti redis saat multi-instance.
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 function rateLimit(max: number, windowMs: number) {
@@ -4445,7 +4479,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         totalTokensSavedEstimate += 650;
         console.log(`[AI Cache Hit] ⚡ Menggunakan hasil cache untuk: "${(message || "").substring(0, 30)}..." (0 token digunakan, hemat biaya 100%).`);
         return res.json({
-          reply: cached.reply,
+          reply: unwrapNestedReply(cached.reply),
           quickReplies: cached.quickReplies,
           extracted: currentDraft || {},
           isComplete: false,
@@ -4570,11 +4604,13 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
             };
           }
 
-          if (typeof parsed.reply === "string" && parsed.reply.trim().startsWith("{") && parsed.reply.trim().endsWith("}")) {
+          if (typeof parsed.reply === "string" && parsed.reply.trim().startsWith("{")) {
             try {
               const inner = JSON.parse(parsed.reply.trim());
               if (inner.reply) parsed = { ...parsed, ...inner };
-            } catch {}
+            } catch {
+              parsed.reply = unwrapNestedReply(parsed.reply);
+            }
           }
 
           parsed.aiProvider = aiResult.provider;
@@ -4796,14 +4832,14 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         }
 
         // If reply is accidentally stringified JSON, unnest it
-        if (typeof parsed.reply === "string" && parsed.reply.trim().startsWith("{") && parsed.reply.trim().endsWith("}")) {
+        if (typeof parsed.reply === "string" && parsed.reply.trim().startsWith("{")) {
           try {
             const inner = JSON.parse(parsed.reply.trim());
             if (inner.reply) {
               parsed = { ...parsed, ...inner };
             }
           } catch {
-            // ignore
+            parsed.reply = unwrapNestedReply(parsed.reply);
           }
         }
 
