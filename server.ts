@@ -325,8 +325,8 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
     text.match(/(?:nama\s*(?:saya|petani)?\s*(?:adalah|:)?\s*|petani\s+|pak\s+|bu\s+|bapak\s+|ibu\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/i) ||
     text.match(/(?:nama\s*:\s*)([A-Za-z\s]+?)(?:,|\.|\n|$)/i);
   if (nameMatch && nameMatch[1] && nameMatch[1].trim().length > 2) {
-    const raw = nameMatch[1].trim();
-    if (!["saya", "petani", "tani", "mitra", "baru", "lahan", "data", "semua", "rekap"].includes(raw.toLowerCase())) {
+    const raw = nameMatch[1].trim().replace(/^(?:bernama|nama)\s+/i, "").replace(/^[:\-,\s]+/, "").trim();
+    if (raw.length > 2 && !["saya", "petani", "tani", "mitra", "baru", "lahan", "data", "semua", "rekap"].includes(raw.toLowerCase())) {
       const lowerRaw = raw.toLowerCase();
       if (lowerRaw.startsWith("pak ") || lowerRaw.startsWith("bapak ")) {
         const cleanName = raw.replace(/^(?:pak|bapak)\s+/i, "").trim();
@@ -398,10 +398,10 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
   if (desaMatch && desaMatch[1]) {
     ext.alamat = `Desa ${desaMatch[1]}${ext.kabupaten ? `, ${ext.kabupaten}` : ""}`;
   }
-  const diMatch = text.match(/(?:di\s+|lokasi\s+|wilayah\s+|kabupaten\s+|kab\.?\s+)([A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+  const diMatch = text.match(/(?:\bdi\s+|\blokaksi\s+|\bwilayah\s+|\bkabupaten\s+|\bkab\.?\s+)([A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
   if (diMatch && diMatch[1] && !ext.kabupaten) {
-    const candidate = diMatch[1].trim();
-    if (!["sawah", "lahan", "kebun", "desa", "sini", "sana", "dinas", "google", "sheets", "database"].includes(candidate.toLowerCase())) {
+    const candidate = diMatch[1].trim().replace(/^(desa|kelurahan|kecamatan)\s+/i, "");
+    if (candidate.length >= 3 && !["sawah", "lahan", "kebun", "desa", "sini", "sana", "dinas", "google", "sheets", "database", "rumah", "ladang", "pasar", "kios", "toko", "kantor", "jalan", "masjid"].includes(candidate.toLowerCase())) {
       ext.kabupaten = candidate;
       if (!ext.alamat) ext.alamat = `Desa Binaan, ${candidate}`;
     }
@@ -4670,7 +4670,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           const rec = saveFarmerRecord(merged, isAdmin ? activeAdmin : undefined, effPhone);
           return res.json({
             reply: formatSuccessFarmerRegistration(rec),
-            extracted: rec, isComplete: true, savedRecord: rec, isAdminAction: isAdmin,
+            extracted: rec, isComplete: true, savedRecord: rec, isAdminAction: isAdmin, aiProvider: "rule_based",
             quickReplies: isAdmin
               ? ["📊 Rekap Semua Petani", "Verifikasi Semua", "Daftarkan Lagi"]
               : ["Cek Harga Cabai Hari Ini", "Konsultasi Hama Tanaman", "Daftarkan Lahan Lain"],
