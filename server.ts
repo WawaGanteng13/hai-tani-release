@@ -261,22 +261,23 @@ async function sendWaText(toRaw: string, body: string): Promise<WaSendResult> {
   }
 }
 // Template tersetujui: terkirim kapan pun (inisiasi bisnis). bodyParams = {{1}}, {{2}}, ...
+// Template statis (tanpa variabel) = components dihilangkan.
 async function sendWaTemplate(toRaw: string, templateName: string, langCode: string, bodyParams: string[]): Promise<WaSendResult> {
   const to = toWaNumber(toRaw);
   if (!/^62[0-9]{8,13}$/.test(to)) return { to, ok: false, error: "nomor tujuan tidak valid" };
   try {
-    const r = await waPostGraph("/messages", {
-      to, type: "template",
-      template: {
-        name: templateName, language: { code: langCode || "id" },
-        components: [{ type: "body", parameters: bodyParams.map((p) => ({ type: "text", text: String(p).slice(0, 1024) })) }],
-      },
-    });
+    const tpl: Record<string, unknown> = { name: templateName, language: { code: langCode || "id" } };
+    if (bodyParams.length > 0) {
+      tpl.components = [{ type: "body", parameters: bodyParams.map((p) => ({ type: "text", text: String(p).slice(0, 1024) })) }];
+    }
+    const r = await waPostGraph("/messages", { to, type: "template", template: tpl });
     return waResult(to, r);
   } catch (err: any) {
     return { to, ok: false, error: String((err && err.message) || err).slice(0, 200) };
   }
 }
+// Pembuka jendela 24 jam: template statis (lolos review tanpa variabel).
+const WA_OPENER_TEMPLATE = "info_terbaru_taniai";
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function broadcastWaText(targets: { nama: string; noHp: string }[], body: string): Promise<{
   attempted: number; sent: number; failed: { nama: string; to: string; errorCode?: number; error?: string }[];
@@ -290,6 +291,22 @@ async function broadcastWaText(targets: { nama: string; noHp: string }[], body: 
       out.failed.push({ nama: t.nama, to: r.to, errorCode: r.errorCode, error: r.error });
     }
     console.log(`[WA bcast] ${r.ok ? "OK" : "GAGAL"} ${t.nama} (${r.to})${r.ok ? "" : " " + (r.errorCode || "") + " " + (r.error || "")}`);
+    await sleepMs(400);
+  }
+  return out;
+}
+async function broadcastWaTemplate(targets: { nama: string; noHp: string }[], templateName: string, langCode: string, params: string[]): Promise<{
+  attempted: number; sent: number; failed: { nama: string; to: string; errorCode?: number; error?: string }[];
+}> {
+  const out = { attempted: targets.length, sent: 0, failed: [] as { nama: string; to: string; errorCode?: number; error?: string }[] };
+  for (const t of targets) {
+    const r = await sendWaTemplate(t.noHp, templateName, langCode, params);
+    if (r.ok) {
+      out.sent++;
+    } else {
+      out.failed.push({ nama: t.nama, to: r.to, errorCode: r.errorCode, error: r.error });
+    }
+    console.log(`[WA tpl] ${r.ok ? "OK" : "GAGAL"} ${t.nama} (${r.to})${r.ok ? "" : " " + (r.errorCode || "") + " " + (r.error || "")}`);
     await sleepMs(400);
   }
   return out;
@@ -3888,12 +3905,18 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
     };
 
     notificationsDb.unshift(newNotif);
-    // viaWa=true → kirim teks WA ke tiap petani target (gagal per-nomor tidak
-    // menggagalkan respons; di luar jendela 24 jam Meta menolak 131047).
+    // viaWa=true → teks (butuh jendela 24 jam; di luar itu 131047).
+    // viaWa="template" → template statis pembuka jendela (terkirim kapan pun).
     let wa: { attempted: number; sent: number; failed: { nama: string; to: string; errorCode?: number; error?: string }[] } | { attempted: 0; reason: string } = { attempted: 0, reason: "viaWa tidak diminta" };
     if (req.body?.viaWa === true) {
       if (matchingFarmers.length > 0) {
         wa = await broadcastWaText(matchingFarmers.map((f) => ({ nama: f.nama, noHp: f.noHp })), alertMessage);
+      } else {
+        wa = { attempted: 0, reason: "tanpa petani target bernomor" };
+      }
+    } else if (req.body?.viaWa === "template") {
+      if (matchingFarmers.length > 0) {
+        wa = await broadcastWaTemplate(matchingFarmers.map((f) => ({ nama: f.nama, noHp: f.noHp })), WA_OPENER_TEMPLATE, "id", []);
       } else {
         wa = { attempted: 0, reason: "tanpa petani target bernomor" };
       }
@@ -5255,6 +5278,12 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     if (req.body?.viaWa === true) {
       if (target.length > 0) {
         wa = await broadcastWaText(target.map((f) => ({ nama: f.nama, noHp: f.noHp })), pesan);
+      } else {
+        wa = { attempted: 0, reason: "tanpa petani target bernomor" };
+      }
+    } else if (req.body?.viaWa === "template") {
+      if (target.length > 0) {
+        wa = await broadcastWaTemplate(target.map((f) => ({ nama: f.nama, noHp: f.noHp })), WA_OPENER_TEMPLATE, "id", []);
       } else {
         wa = { attempted: 0, reason: "tanpa petani target bernomor" };
       }
