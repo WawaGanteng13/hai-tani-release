@@ -1281,6 +1281,77 @@ function unwrapNestedReply(text: string): string {
   }
 }
 
+// Fast-path smalltalk 0ms (tanpa LLM/Laya): salam, identitas, makasih, bantuan.
+// Pola dijangkar + batas panjang agar tak membajak intent fungsional (ERP,
+// daftar, analitik). "oke/makasih" mengalah bila ada draf terbuka (konfirmasi).
+function handleFastSmalltalk(
+  message: string, isAdmin: boolean, activeAdmin: AdminUser | undefined,
+  effPhone: string | undefined, hasOpenDraft: boolean
+): { reply: string; quickReplies: string[]; extracted: {}; isComplete: boolean; isAdminAction: boolean } | null {
+  const clean = String(message || "").trim().toLowerCase();
+  if (!clean || clean.length > 40) return null;
+  const bare = (re: RegExp) => re.test(clean);
+  // Salam — admin: ringkasan eksekutif yang sama via fallback deterministik.
+  if (bare(/^(halo+|hallo+|hai+|hi+|hei+|pagi+|siang|sore|malam|assalamu'?alaikum|punten|sampurasun|permisi)[?!.\s]*$/)) {
+    if (isAdmin && activeAdmin) {
+      const fb: any = generateSmartAdminFallback(message, activeAdmin, farmersDb, commoditiesDb, {});
+      return { reply: String(fb.reply || ""), quickReplies: fb.quickReplies || [], extracted: {}, isComplete: false, isAdminAction: true };
+    }
+    return {
+      reply: "🌾 *Salam Berkah Petani!* Saya Kang Tani AI. Mau daftar lahan, cek harga pasar, atau konsultasi hama & pupuk?",
+      quickReplies: ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini", "Konsultasi Hama Tanaman"],
+      extracted: {}, isComplete: false, isAdminAction: false,
+    };
+  }
+  // Identitas.
+  if (bare(/^(aku siapa|siapa (saya|aku|gue)|kamu siapa|siapa kamu|who am i)\s*\??$/)) {
+    if (isAdmin && activeAdmin) {
+      return {
+        reply: `👋 Halo Bpk/Ibu *${activeAdmin.nama}*!\n\nAnda terdaftar sebagai *${activeAdmin.role}* di sistem Kang Tani AI.\n🏢 *${activeAdmin.instansi}*\nAda yang bisa saya bantu?`,
+        quickReplies: ["📊 Rekap Semua Petani", "🌶️ Analisis Anomali Cabai", "📥 Siapkan Ekspor Sheets"],
+        extracted: {}, isComplete: false, isAdminAction: true,
+      };
+    }
+    const me = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(effPhone));
+    if (me) {
+      return {
+        reply: `👋 Halo *${me.nama}*!\n\nNomor ini terdaftar sebagai petani mitra (${me.komoditas || "-"}, ${me.luasLahan || "-"} Ha, ${me.kabupaten || me.alamat || "-"}). Status: *${me.statusVerifikasi}*. Ada yang bisa saya bantu?`,
+        quickReplies: ["Cek Harga Pasar Hari Ini", "Konsultasi Hama Tanaman", "Cek Status Lahan Saya"],
+        extracted: {}, isComplete: false, isAdminAction: false,
+      };
+    }
+    return {
+      reply: "👋 Halo! Nomor ini belum terdaftar sebagai petani mitra. Ketik *daftar* untuk mendaftarkan lahan, atau tanya harga pasar & hama langsung.",
+      quickReplies: ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini"],
+      extracted: {}, isComplete: false, isAdminAction: false,
+    };
+  }
+  // Makasih/oke — mengalah bila ada draf terbuka.
+  if (!hasOpenDraft && clean.length <= 30 && bare(/^(makasih|terima kasih|thanks?|thank you|oke+|ok+|okay|siap+|baik+|mantap+|sip+)[!.\s]*$/)) {
+    return {
+      reply: isAdmin ? "Sama-sama, Bpk/Ibu! 🙏 Ada lagi yang bisa saya bantu?" : "Sama-sama! 🙏 Ada lagi yang bisa saya bantu?",
+      quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "🌶️ Analisis Anomali Cabai"] : ["Cek Harga Pasar Hari Ini", "Konsultasi Hama Tanaman"],
+      extracted: {}, isComplete: false, isAdminAction: isAdmin,
+    };
+  }
+  // Bantuan.
+  if (clean.length <= 30 && bare(/^(bantuan|help|tolong|bisa apa|menu|panduan|info|fitur)[?.\s]*$/)) {
+    if (isAdmin && activeAdmin) {
+      return {
+        reply: `🤖 *Bantuan Kang Tani AI (Admin)*\n\n• *Rekap & laporan* — "rekap semua petani", "analisis panen cabai"\n• *Verifikasi* — "tampilkan yang belum verifikasi"\n• *Broadcast* — "draf broadcast hama", "peringatan harga"\n• *Kas/Stok/HPP* — "catat kas", "stok urea keluar", "hitung hpp"\n• *Data* — "ekspor csv", "buka sheets"`,
+        quickReplies: ["📊 Rekap Semua Petani", "Verifikasi Semua", "Buat Draf Broadcast WA"],
+        extracted: {}, isComplete: false, isAdminAction: true,
+      };
+    }
+    return {
+      reply: `🤖 *Bantuan Kang Tani AI*\n\n• *Daftar lahan* — ketik "daftar" lalu ikuti panduan\n• *Harga pasar* — "cek harga cabai hari ini"\n• *Hama & pupuk* — ceritakan gejala + komoditas\n• *Status lahan* — "cek status lahan saya"`,
+      quickReplies: ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini", "Konsultasi Hama Tanaman"],
+      extracted: {}, isComplete: false, isAdminAction: false,
+    };
+  }
+  return null;
+}
+
 // Rate limiter stdlib (tanpa dep). ponytail: ganti redis saat multi-instance.
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 function rateLimit(max: number, windowMs: number) {
@@ -2101,7 +2172,7 @@ async function checkMetaModelHealth(): Promise<{ ok: boolean; latencyMs?: number
 async function callMetaModelChat(
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
   modelOverride?: string,
-  options?: { signal?: AbortSignal; maxTokens?: number }
+  options?: { signal?: AbortSignal; maxTokens?: number; timeoutMs?: number }
 ): Promise<string> {
   const cfg = getMetaModelConfig();
   if (!cfg.isConfigured) {
@@ -2109,8 +2180,8 @@ async function callMetaModelChat(
   }
   const model = modelOverride || cfg.model;
   const controller = new AbortController();
-  // Muse Spark selalu reasoning sebelum menjawab -> timeout lebih longgar dari 9Router.
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  // Muse Spark selalu reasoning sebelum menjawab -> default 25 dtk; chat oper 7 dtk via options.
+  const timeout = setTimeout(() => controller.abort(), options?.timeoutMs || 25000);
   if (options?.signal) {
     options.signal.addEventListener("abort", () => {
       clearTimeout(timeout);
@@ -2210,7 +2281,7 @@ async function callUniversalAI(
   systemPrompt: string,
   userPrompt: string,
   history?: Array<{ sender: string; text: string }>,
-  options?: { signal?: AbortSignal; maxOutputTokens?: number }
+  options?: { signal?: AbortSignal; maxOutputTokens?: number; timeoutMs?: number }
 ): Promise<{ text: string; provider: "9router" | "gemini" | "meta"; model: string }> {
   if (options?.signal?.aborted) {
     throw new Error("Operasi dibatalkan sebelum pengiriman (hemat token)");
@@ -2247,6 +2318,7 @@ async function callUniversalAI(
       const text = await callMetaModelChat(chatMessages, undefined, {
         signal: options?.signal,
         maxTokens: options?.maxOutputTokens || 550,
+        timeoutMs: options?.timeoutMs,
       });
       console.log(`[AI Dispatcher] Balasan via Meta Model API (${metaCfg.model})`);
       return { text, provider: "meta", model: metaCfg.model };
@@ -4314,6 +4386,12 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     const activeAdmin = findAdmin(effPhone);
     const isAdmin = !!activeAdmin;
 
+    // 0z. Fast-path smalltalk: 0ms, tanpa LLM/Laya (salam, identitas, makasih, bantuan).
+    const hasOpenDraft = [currentDraft, currentCashDraft, currentStockDraft, currentHppDraft, currentSupplierDraft]
+      .some((d) => d && typeof d === "object" && Object.keys(d).length > 0);
+    const fast = handleFastSmalltalk(message, isAdmin, activeAdmin, effPhone, hasOpenDraft);
+    if (fast) return res.json({ ...fast, aiProvider: "fast_path" } as any);
+
     // Laya intent lazy: regex dulu (0ms), sidecar hanya saat regex miss.
     // Null saat sidecar mati -> regex tetap jalan.
     let _chatLaya: { intent: string; confidence: number } | null | undefined;
@@ -4340,8 +4418,13 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     // ("urea keluar ... kios ...") tidak dimakan alur pendaftaran kios.
     {
       const erpLower = (message || "").toLowerCase();
-      const layaErp = await chatLaya();
-      let erpIntent = detectErpIntent(erpLower, layaErp);
+      // Lazy-benar: regex dulu (0ms); sidecar hanya saat regex miss.
+      let erpIntent = detectErpIntent(erpLower, null);
+      let layaErp: { intent: string; confidence: number } | null | undefined = null;
+      if (!erpIntent) {
+        layaErp = await chatLaya();
+        erpIntent = detectErpIntent(erpLower, layaErp);
+      }
       const cashDraftIn = (currentCashDraft || {}) as Partial<CashTransaction>;
       const stockDraftIn = (currentStockDraft || {}) as Partial<StockMutation>;
       const hppDraftIn = (currentHppDraft || {}) as HppChatDraft;
@@ -4576,7 +4659,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
           adminSystemInstructions,
           message,
           history,
-          { signal: clientAbortController.signal, maxOutputTokens: 550 }
+          { signal: clientAbortController.signal, maxOutputTokens: 550, timeoutMs: 7000 }
         );
       } catch (err: any) {
         if (isClientAborted || clientAbortController.signal.aborted) {
@@ -4802,7 +4885,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         systemInstructions,
         message,
         history,
-        { signal: clientAbortController.signal, maxOutputTokens: 550 }
+        { signal: clientAbortController.signal, maxOutputTokens: 550, timeoutMs: 7000 }
       );
     } catch (error: any) {
       if (isClientAborted || clientAbortController.signal.aborted) {
