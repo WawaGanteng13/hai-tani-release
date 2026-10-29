@@ -198,6 +198,103 @@ function findAdmin(phone?: string): AdminUser | undefined {
   return adminsDb.find((a) => a.aktif && normalizePhone(a.noHp) === norm);
 }
 
+// ---- WhatsApp Cloud API outbound (produksi; EWS broadcast) ----
+// Token System User permanen dari WHATSAPP_ACCESS_TOKEN. phoneId default =
+// nomor bisnis produksi +62 881-0261-39498 (bukan secret, hanya routing id).
+const WA_GRAPH_VERSION = "v24.0";
+const WA_DEFAULT_PHONE_ID = "1345016292036690";
+function waOutboundConfig(): { token: string; phoneId: string } {
+  return {
+    token: (process.env.WHATSAPP_ACCESS_TOKEN || "").trim(),
+    phoneId: (process.env.PHONE_NUMBER_ID || WA_DEFAULT_PHONE_ID).trim(),
+  };
+}
+// 08xx/+62 campur → 62xxxxxxxxxx (format `to` Meta).
+function toWaNumber(phone?: string): string {
+  let p = String(phone || "").replace(/[^0-9]/g, "");
+  if (p.startsWith("0")) p = "62" + p.slice(1);
+  else if (/^8[0-9]{8,12}$/.test(p)) p = "62" + p;
+  return p;
+}
+type WaSendResult = { to: string; ok: boolean; messageId?: string; errorCode?: number; error?: string };
+async function waPostGraph(path: string, payload: Record<string, unknown>, timeoutMs = 8000): Promise<{ ok: boolean; json: any; status: number }> {
+  const { token, phoneId } = waOutboundConfig();
+  if (!token || !phoneId) return { ok: false, json: null, status: 0 };
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneId}${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", ...payload }),
+      signal: ctl.signal,
+    });
+    const json: any = await r.json().catch(() => null);
+    return { ok: r.ok, json, status: r.status };
+  } finally {
+    clearTimeout(t);
+  }
+}
+function waResult(to: string, r: { ok: boolean; json: any; status: number }): WaSendResult {
+  if (r.status === 0) return { to, ok: false, error: "WHATSAPP_ACCESS_TOKEN belum dikonfigurasi" };
+  if (!r.ok) {
+    return {
+      to, ok: false,
+      errorCode: Number(r.json?.error?.code) || undefined,
+      error: String(r.json?.error?.message || `HTTP ${r.status}`).slice(0, 200),
+    };
+  }
+  return { to, ok: true, messageId: String(r.json?.messages?.[0]?.id || "") };
+}
+// Teks biasa: hanya terkirim bila jendela layanan 24 jam penerima terbuka
+// (di luar itu Meta menolak 131047 — pakai template).
+async function sendWaText(toRaw: string, body: string): Promise<WaSendResult> {
+  const to = toWaNumber(toRaw);
+  if (!/^62[0-9]{8,13}$/.test(to)) return { to, ok: false, error: "nomor tujuan tidak valid" };
+  try {
+    const r = await waPostGraph("/messages", {
+      to, type: "text", text: { body: String(body).slice(0, 4000), preview_url: false },
+    });
+    return waResult(to, r);
+  } catch (err: any) {
+    return { to, ok: false, error: String((err && err.message) || err).slice(0, 200) };
+  }
+}
+// Template tersetujui: terkirim kapan pun (inisiasi bisnis). bodyParams = {{1}}, {{2}}, ...
+async function sendWaTemplate(toRaw: string, templateName: string, langCode: string, bodyParams: string[]): Promise<WaSendResult> {
+  const to = toWaNumber(toRaw);
+  if (!/^62[0-9]{8,13}$/.test(to)) return { to, ok: false, error: "nomor tujuan tidak valid" };
+  try {
+    const r = await waPostGraph("/messages", {
+      to, type: "template",
+      template: {
+        name: templateName, language: { code: langCode || "id" },
+        components: [{ type: "body", parameters: bodyParams.map((p) => ({ type: "text", text: String(p).slice(0, 1024) })) }],
+      },
+    });
+    return waResult(to, r);
+  } catch (err: any) {
+    return { to, ok: false, error: String((err && err.message) || err).slice(0, 200) };
+  }
+}
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function broadcastWaText(targets: { nama: string; noHp: string }[], body: string): Promise<{
+  attempted: number; sent: number; failed: { nama: string; to: string; errorCode?: number; error?: string }[];
+}> {
+  const out = { attempted: targets.length, sent: 0, failed: [] as { nama: string; to: string; errorCode?: number; error?: string }[] };
+  for (const t of targets) {
+    const r = await sendWaText(t.noHp, body);
+    if (r.ok) {
+      out.sent++;
+    } else {
+      out.failed.push({ nama: t.nama, to: r.to, errorCode: r.errorCode, error: r.error });
+    }
+    console.log(`[WA bcast] ${r.ok ? "OK" : "GAGAL"} ${t.nama} (${r.to})${r.ok ? "" : " " + (r.errorCode || "") + " " + (r.error || "")}`);
+    await sleepMs(400);
+  }
+  return out;
+}
+
 // Universal Entity Extractor from conversation text / voice note
 function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord> = {}): {
   extracted: Partial<FarmerRecord>;
@@ -3758,7 +3855,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   });
 
   // POST broadcast anomaly notification to farmers
-  app.post("/api/notifications/broadcast", requireSession(), (req, res) => {
+  app.post("/api/notifications/broadcast", requireSession(), async (req, res) => {
     const gate = requireRequesterAdmin(req.body);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
@@ -3791,7 +3888,17 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
     };
 
     notificationsDb.unshift(newNotif);
-    res.json({ success: true, notification: newNotif, recipientsCount: newNotif.jumlahPetaniTerdampak });
+    // viaWa=true → kirim teks WA ke tiap petani target (gagal per-nomor tidak
+    // menggagalkan respons; di luar jendela 24 jam Meta menolak 131047).
+    let wa: { attempted: number; sent: number; failed: { nama: string; to: string; errorCode?: number; error?: string }[] } | { attempted: 0; reason: string } = { attempted: 0, reason: "viaWa tidak diminta" };
+    if (req.body?.viaWa === true) {
+      if (matchingFarmers.length > 0) {
+        wa = await broadcastWaText(matchingFarmers.map((f) => ({ nama: f.nama, noHp: f.noHp })), alertMessage);
+      } else {
+        wa = { attempted: 0, reason: "tanpa petani target bernomor" };
+      }
+    }
+    res.json({ success: true, notification: newNotif, recipientsCount: newNotif.jumlahPetaniTerdampak, wa });
   });
 
   // GET notifications list
@@ -5123,7 +5230,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
   });
 
   // Broadcast hama khusus (template + endpoint sendiri).
-  app.post("/api/notifications/pest-broadcast", requireSession(), (req, res) => {
+  app.post("/api/notifications/pest-broadcast", requireSession(), async (req, res) => {
     const gate = requireRequesterAdmin(req.body);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
@@ -5144,7 +5251,15 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       targetPetaniNames: target.length ? target.map((f) => f.nama) : ["Seluruh Petani Terdaftar"],
     };
     notificationsDb.unshift(notif);
-    res.json({ success: true, notification: notif });
+    let wa: { attempted: number; sent: number; failed: { nama: string; to: string; errorCode?: number; error?: string }[] } | { attempted: 0; reason: string } = { attempted: 0, reason: "viaWa tidak diminta" };
+    if (req.body?.viaWa === true) {
+      if (target.length > 0) {
+        wa = await broadcastWaText(target.map((f) => ({ nama: f.nama, noHp: f.noHp })), pesan);
+      } else {
+        wa = { attempted: 0, reason: "tanpa petani target bernomor" };
+      }
+    }
+    res.json({ success: true, notification: notif, wa });
   });
 
   // CSV Export for Google Sheets

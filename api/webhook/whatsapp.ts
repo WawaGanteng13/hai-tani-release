@@ -53,7 +53,7 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 3000);
   try {
-    const r = await fetch(`https://graph.facebook.com/v19.0/${phoneId}/messages`, {
+    const r = await fetch(`https://graph.facebook.com/v24.0/${phoneId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body: String(body).slice(0, 4000), preview_url: false } }),
