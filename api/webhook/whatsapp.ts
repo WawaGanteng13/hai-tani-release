@@ -111,6 +111,8 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
   try {
     const payload = JSON.parse(raw.toString("utf-8"));
     inc = pickIncoming(payload?.entry?.[0]?.changes?.[0]?.value);
+    const eid = String(payload?.entry?.[0]?.id || "");
+    if (eid) console.log(`[wa-fwd] waba=${eid} from=${inc?.from || "-"} msglen=${(inc?.text || "").length}`);
   } catch {
     inc = null;
   }
