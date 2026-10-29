@@ -1352,6 +1352,44 @@ function handleFastSmalltalk(
   return null;
 }
 
+// Predikat intent bersama (satu-satunya sumber kebenaran; dipakai router + cabang).
+function isRegistrationQuery(lower: string): boolean {
+  return /daft[a-z]*|tambah(kan)?|input|masukkan|catat|simpan/.test(lower || "");
+}
+function isListingQuery(lower: string): boolean {
+  return /semua|seluruh|\blist\b|tampilkan|lihat|yang belum|rekap|total|berapa|ringkas|analisis|laporan|agregat/.test(lower || "");
+}
+function isAnalyticsQuery(lower: string): boolean {
+  const t = lower || "";
+  return (
+    t.includes("berapa") || t.includes("total") || t.includes("rekap") ||
+    t.includes("daftar") || t.includes("analisis") || t.includes("laporan") ||
+    t.includes("agregat") || t.includes("ringkasan")
+  ) && (
+    t.includes("luas") || t.includes("panen") || t.includes("ton") ||
+    t.includes("hektar") || t.includes("petani") || t.includes("lahan") ||
+    t.includes("komoditas") || t.includes("verifikasi")
+  );
+}
+
+// Router precedence eksplisit (telemetri + dokumen; cabang tetap early-return):
+// batalkan > ERP > supplier > registrasi > analitik > harga > hama > smalltalk > LLM.
+function detectTopIntent(
+  message: string, isAdmin: boolean, activeAdmin: AdminUser | undefined,
+  effPhone: string | undefined, hasOpenDraft: boolean
+): string {
+  const lower = String(message || "").toLowerCase();
+  if (/^\s*batal/i.test(message || "")) return "cancel";
+  if (detectErpIntent(lower, null)) return "erp";
+  if (isSupplierIntent(message)) return "supplier";
+  if (isRegistrationQuery(lower) && !isListingQuery(lower)) return "register";
+  if (isAdmin && isAnalyticsQuery(lower)) return "analytics";
+  if (/harga|pasar|anomali/.test(lower)) return "price";
+  if (/hama|penyakit|wereng|ulat|tikus|keong|sundep|blas|kresek|tungro/.test(lower)) return "hama";
+  if (handleFastSmalltalk(message, isAdmin, activeAdmin, effPhone, hasOpenDraft)) return "smalltalk";
+  return "llm";
+}
+
 // Rate limiter stdlib (tanpa dep). ponytail: ganti redis saat multi-instance.
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 function rateLimit(max: number, windowMs: number) {
@@ -4248,27 +4286,9 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
 
     // Registrasi ("mendaftarkan petani") mengandung "daftar"+"petani" — jangan
     // biarkan analitik menyergapnya. Kecuali ada kualifikasi listing eksplisit.
-    const looksRegistration = /daft[a-z]*|tambah(kan)?|input|masukkan|catat|simpan/.test(lower);
-    const looksListing = /semua|seluruh|\blist\b|tampilkan|lihat|yang belum|rekap|total|berapa|ringkas|analisis|laporan|agregat/.test(lower);
-    if (looksRegistration && !looksListing) return null;
+    if (isRegistrationQuery(lower) && !isListingQuery(lower)) return null;
 
-    const isAnalyticsIntent =
-      (lower.includes("berapa") ||
-        lower.includes("total") ||
-        lower.includes("rekap") ||
-        lower.includes("daftar") ||
-        lower.includes("analisis") ||
-        lower.includes("laporan") ||
-        lower.includes("agregat") ||
-        lower.includes("ringkasan")) &&
-      (lower.includes("luas") ||
-        lower.includes("panen") ||
-        lower.includes("ton") ||
-        lower.includes("hektar") ||
-        lower.includes("petani") ||
-        lower.includes("lahan") ||
-        lower.includes("komoditas") ||
-        lower.includes("verifikasi"));
+    const isAnalyticsIntent = isAnalyticsQuery(lower);
 
     if (!isAnalyticsIntent) return null;
 
@@ -4395,6 +4415,8 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     // 0z. Fast-path smalltalk: 0ms, tanpa LLM/Laya (salam, identitas, makasih, bantuan).
     const hasOpenDraft = [currentDraft, currentCashDraft, currentStockDraft, currentHppDraft, currentSupplierDraft]
       .some((d) => d && typeof d === "object" && Object.keys(d).length > 0);
+    const topIntent = detectTopIntent(message, isAdmin, activeAdmin, effPhone, hasOpenDraft);
+    console.log(`[ChatRoute] intent=${topIntent} admin=${isAdmin} len=${String(message || "").length}`);
     const fast = handleFastSmalltalk(message, isAdmin, activeAdmin, effPhone, hasOpenDraft);
     if (fast) return res.json({ ...fast, aiProvider: "fast_path" } as any);
 
@@ -4563,7 +4585,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
 
     if (isCacheable && aiResponseCache.has(cacheKey)) {
       const cached = aiResponseCache.get(cacheKey)!;
-      if (cached.dataVersion === currentDataVersion && Date.now() - cached.timestamp < 1800000) {
+      if (cached.dataVersion === currentDataVersion && Date.now() - cached.timestamp < 7200000) {
         totalCacheHits++;
         totalTokensSavedEstimate += 650;
         console.log(`[AI Cache Hit] ⚡ Menggunakan hasil cache untuk: "${(message || "").substring(0, 30)}..." (0 token digunakan, hemat biaya 100%).`);
@@ -4701,6 +4723,9 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
               parsed.reply = unwrapNestedReply(parsed.reply);
             }
           }
+          if (typeof parsed.reply !== "string" || !parsed.reply.trim()) {
+            throw new Error("LLM balasan kosong");
+          }
 
           parsed.aiProvider = aiResult.provider;
           parsed.aiModel = aiResult.model;
@@ -4719,7 +4744,9 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
           const merged = { ...(currentDraft || {}), ...(parsed.extracted || {}), ...(reg.extracted || {}) };
           const check = checkFarmerCompleteness(merged);
 
-          if (isAddRequest || parsed.isComplete) {
+          // Tolak isComplete palsu: klaim lengkap tanpa satu pun field terisi = abaikan.
+          const mergedHasAnyField = !!(merged.nama || merged.noHp || merged.komoditas || merged.luasLahan || merged.alamat || merged.kabupaten);
+          if (isAddRequest || (parsed.isComplete && mergedHasAnyField)) {
             if (check.isComplete) {
               const newRecord = saveFarmerRecord(merged, activeAdmin, activeAdmin.noHp);
               parsed.savedRecord = newRecord;
@@ -4770,7 +4797,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
     // GENERAL CONVERSATION (Petani Biasa / Non-Admin) with Lean Targeted Context
     const leanContext = buildLeanTargetedContext(message, false);
-    const layaDetected = await chatLaya();
+    const layaDetected = ai ? await chatLaya() : null; // rule path (ai null) tak butuh fetch ~1 dtk
 
     const systemInstructions = `Anda adalah "Kang Tani AI", asisten digital cerdas, sopan, dan hangat di WhatsApp untuk petani Indonesia.
 
@@ -4931,6 +4958,9 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
             parsed.reply = unwrapNestedReply(parsed.reply);
           }
         }
+        if (typeof parsed.reply !== "string" || !parsed.reply.trim()) {
+          throw new Error("LLM balasan kosong");
+        }
 
         parsed.aiProvider = aiResult.provider;
         parsed.aiModel = aiResult.model;
@@ -4953,7 +4983,9 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         const check = checkFarmerCompleteness(merged);
 
         // Only save when ALL required fields are complete!
-        if (isAddRequest || parsed.isComplete) {
+        // Tolak isComplete palsu: klaim lengkap tanpa satu pun field terisi = abaikan.
+        const mergedHasAnyField = !!(merged.nama || merged.noHp || merged.komoditas || merged.luasLahan || merged.alamat || merged.kabupaten);
+        if (isAddRequest || (parsed.isComplete && mergedHasAnyField)) {
           if (check.isComplete) {
             const newRecord = saveFarmerRecord(merged, undefined, effPhone);
             parsed.savedRecord = newRecord;
