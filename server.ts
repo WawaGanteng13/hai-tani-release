@@ -2051,7 +2051,7 @@ function formatSuccessHpp(r: HppReport): string {
   );
 }
 // Laya intent sidecar (stdlib http, opt-in via LAYA_URL or local auto-daemon). Timeout 1.2s, cooldown 30s saat down.
-// Lazy: hanya fetch saat regex belum yakin + cache 10 mnt. Regex hit -> 0ms overhead.
+// Lazy: hanya fetch saat regex belum yakin + cache 60 mnt. Regex hit -> 0ms overhead.
 const LAYA_URL = (process.env.LAYA_URL?.trim() || "http://127.0.0.1:8787").replace(/\/+$/, "");
 let layaUnavailableUntil = 0;
 const layaCache = new Map<string, { v: { intent: string; confidence: number; model?: string; source?: string }; exp: number }>();
@@ -2140,10 +2140,10 @@ async function getLayaIntent(message: string): Promise<{ intent: string; confide
     if (Date.now() < hit.exp) return hit.v;
     layaCache.delete(key);
   }
-  if (layaCache.size > 500) {
+  if (layaCache.size > 2000) {
     for (const [k, v] of layaCache) {
       if (Date.now() > v.exp) layaCache.delete(k);
-      if (layaCache.size <= 400) break;
+      if (layaCache.size <= 1500) break;
     }
   }
   try {
@@ -2165,7 +2165,7 @@ async function getLayaIntent(message: string): Promise<{ intent: string; confide
       model: j.model ? String(j.model) : undefined,
       source: "laya_sidecar",
     };
-    layaCache.set(key, { v, exp: Date.now() + 600000 });
+    layaCache.set(key, { v, exp: Date.now() + 3600000 });
     console.log(`[Laya Decision] Intent: "${v.intent}" (${(v.confidence * 100).toFixed(1)}%) for "${message.slice(0, 30)}..."`);
     return v;
   } catch {
@@ -3102,7 +3102,7 @@ export function createServerApp() {
       sidecarDetails: sidecarData,
       cacheStats: {
         cachedKeysCount: layaCache.size,
-        maxKeys: 500,
+        maxKeys: 2000,
         ttlMs: 600000,
       },
       engineSpecs: {
