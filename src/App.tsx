@@ -4,6 +4,7 @@ import { AgriProfessionalDashboard } from './components/AgriProfessionalDashboar
 import { WhatsAppChatbot } from './components/WhatsAppChatbot';
 import { GoogleSheetsView } from './components/GoogleSheetsView';
 import { MarketAnomalyView } from './components/MarketAnomalyView';
+import { MarketPriceTable } from './components/MarketPriceTable';
 import { DataScientistPortal } from './components/DataScientistPortal';
 import { FarmerSupplierMapView } from './components/FarmerSupplierMapView';
 import { WebhookModal } from './components/WebhookModal';
@@ -420,14 +421,17 @@ export default function App() {
       <main className={activeTab === 'map' ? 'flex-1 p-0 overflow-hidden' : 'flex-1 px-4 sm:px-6 lg:px-8 py-6'}>
         <div key={activeTab} className="animate-fade-in">
         {activeTab === 'dashboard' && (
-          <AgriProfessionalDashboard
-            farmers={farmers}
-            commodities={commodities}
-            recommendation={recommendation}
-            onRefreshData={loadData}
-            loading={loading}
-            onNavigateToSheets={() => setActiveTab('sheets')}
-          />
+          <div className="space-y-6">
+            <AgriProfessionalDashboard
+              farmers={farmers}
+              commodities={commodities}
+              recommendation={recommendation}
+              onRefreshData={loadData}
+              loading={loading}
+              onNavigateToSheets={() => setActiveTab('sheets')}
+            />
+            <MarketPriceTable />
+          </div>
         )}
 
         {activeTab === 'chat' && (

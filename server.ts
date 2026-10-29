@@ -46,6 +46,119 @@ let cashDb: CashTransaction[] = [];
 let stockDb: StockMutation[] = [];
 let hppDb: HppReport[] = [];
 
+// Harga pasar live SISKAPERBAPO Disperindag Jatim (cache 30 menit)
+interface PasarPrice {
+  nama: string;
+  satuan: string;
+  harga: number;
+}
+let pasarCache: { at: number; tanggal: string; daftar: PasarPrice[] } | null = null;
+const PASAR_TTL_MS = 30 * 60 * 1000;
+
+function stripHtmlTags(s: string): string {
+  return (s || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+async function fetchHargaPasar(): Promise<{ tanggal: string; daftar: PasarPrice[]; live: boolean }> {
+  const now = Date.now();
+  if (pasarCache && now - pasarCache.at < PASAR_TTL_MS) {
+    return { tanggal: pasarCache.tanggal, daftar: pasarCache.daftar, live: false };
+  }
+  const d = new Date();
+  const tanggal = `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    const res = await fetch("https://siskaperbapo.jatimprov.go.id/harga/tabel.nodesign", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `tanggal=${encodeURIComponent(tanggal)}&kabkota=&pasar=`,
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    const html = await res.text();
+    const daftar: PasarPrice[] = [];
+    const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+    let rm: RegExpExecArray | null;
+    while ((rm = rowRe.exec(html)) !== null) {
+      const cellRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+      const cells: string[] = [];
+      let cm: RegExpExecArray | null;
+      while ((cm = cellRe.exec(rm[1])) !== null) cells.push(stripHtmlTags(cm[1]));
+      if (cells.length >= 4 && /^\d+$/.test(cells[0] || "")) {
+        const harga = parseIdNumber(cells[3] || "");
+        if (cells[1] && harga !== undefined) daftar.push({ nama: cells[1], satuan: cells[2] || "kg", harga });
+      }
+    }
+    if (daftar.length > 0) {
+      pasarCache = { at: now, tanggal, daftar };
+      return { tanggal, daftar, live: true };
+    }
+  } catch (e) {
+    console.log("[HargaPasar] fetch gagal, pakai cache:", (e as Error)?.message || e);
+  }
+  if (pasarCache) return { tanggal: pasarCache.tanggal, daftar: pasarCache.daftar, live: false };
+  return { tanggal, daftar: [], live: false };
+}
+
+const HARGA_ALIAS: Array<{ keys: string[]; match: string[] }> = [
+  { keys: ["rawit"], match: ["cabe rawit merah"] },
+  { keys: ["keriting"], match: ["cabe merah keriting"] },
+  { keys: ["cabai", "cabe", "lombok"], match: ["cabe rawit merah", "cabe merah keriting", "cabe merah besar"] },
+  { keys: ["bawang merah"], match: ["bawang merah"] },
+  { keys: ["bawang putih"], match: ["bawang putih"] },
+  { keys: ["bawang"], match: ["bawang merah", "bawang putih"] },
+  { keys: ["jagung"], match: ["jagung pipilan kering"] },
+  { keys: ["beras", "padi", "gabah"], match: ["beras premium", "beras medium"] },
+  { keys: ["kedelai", "kedele"], match: ["kacang kedelai lokal", "kacang kedelai impor"] },
+  { keys: ["tomat"], match: ["tomat"] },
+  { keys: ["kentang"], match: ["kentang"] },
+  { keys: ["kubis"], match: ["kol/kubis"] },
+  { keys: ["kol"], match: ["kol/kubis"] },
+  { keys: ["wortel", "wortal"], match: ["wortel"] },
+  { keys: ["buncis"], match: ["buncis"] },
+  { keys: ["ketela", "singkong"], match: ["ketela pohon"] },
+  { keys: ["ubi"], match: ["ketela pohon"] },
+  { keys: ["kacang hijau"], match: ["kacang hijau"] },
+  { keys: ["kacang tanah"], match: ["kacang tanah"] },
+  { keys: ["telur"], match: ["telur ayam ras"] },
+  { keys: ["ayam"], match: ["daging ayam ras", "telur ayam ras"] },
+  { keys: ["urea"], match: ["pupuk urea"] },
+  { keys: ["npk", "phonska"], match: ["pupuk npk"] },
+  { keys: ["za"], match: ["pupuk za"] },
+  { keys: ["kcl"], match: ["pupuk kcl"] },
+  { keys: ["sp36", "sp-36", "sp 36"], match: ["pupuk sp"] },
+  { keys: ["pupuk"], match: ["pupuk urea", "pupuk npk", "pupuk sp", "pupuk za", "pupuk kcl"] },
+];
+
+function hargaKeyHit(lower: string, key: string): boolean {
+  if (key.length <= 3) return new RegExp(`\\b${key}\\b`).test(lower);
+  return lower.includes(key);
+}
+
+async function formatHargaPasarReply(message: string): Promise<string> {
+  const lower = (message || "").toLowerCase();
+  const { tanggal, daftar } = await fetchHargaPasar();
+  if (daftar.length === 0) {
+    return `📊 *Informasi Harga Pasar:*\n\nMohon maaf, data harga pasar SISKAPERBAPO Jatim sedang tidak bisa diakses saat ini. Silakan coba lagi beberapa menit lagi atau cek langsung di siskaperbapo.jatimprov.go.id/harga/tabel`;
+  }
+  const byName = (want: string) => daftar.find((p) => p.nama.toLowerCase().includes(want));
+  let picks: PasarPrice[] = [];
+  for (const a of HARGA_ALIAS) {
+    if (a.keys.some((k) => hargaKeyHit(lower, k))) {
+      picks = a.match.map(byName).filter((p): p is PasarPrice => !!p);
+      if (picks.length > 0) break;
+    }
+  }
+  if (picks.length === 0) {
+    picks = ["beras premium", "cabe rawit merah", "bawang merah", "jagung pipilan kering"]
+      .map(byName)
+      .filter((p): p is PasarPrice => !!p);
+  }
+  const lines = picks.map((p) => `• ${p.nama}: Rp ${p.harga.toLocaleString("id-ID")}/${p.satuan}`);
+  return `📊 *Harga Pasar Jatim (${tanggal}):*\n${lines.join("\n")}\n\n🔎 _Sumber: SISKAPERBAPO Disperindag Jatim_\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
+}
+
 // Disk-backed persistence directories & paths
 const DATA_DIR = path.join(process.cwd(), "data");
 const FARMERS_FILE = path.join(DATA_DIR, "farmers_db.json");
@@ -4047,6 +4160,21 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
     res.json(commoditiesDb);
   });
 
+  app.get("/api/harga-pasar", async (_req, res) => {
+    try {
+      const { tanggal, daftar, live } = await fetchHargaPasar();
+      res.json({
+        sumber: "SISKAPERBAPO Disperindag Jatim",
+        tanggal,
+        live,
+        count: daftar.length,
+        daftar,
+      });
+    } catch (e: any) {
+      res.status(502).json({ error: "Gagal mengambil harga pasar", detail: String(e?.message || e) });
+    }
+  });
+
   // POST simulate or update commodity price
   app.post("/api/commodities/update", requireSession(), (req, res) => {
     const gate = requireRequesterAdmin(req.body);
@@ -4929,6 +5057,23 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         }
       }
 
+      // Harga pasar live untuk admin (gantikan data seed statis)
+      const lowerAdminMsg = (message || "").toLowerCase();
+      const isAdminPrice =
+        /harga|anomali|inflasi|pasar/.test(lowerAdminMsg) &&
+        !/daftar|tambah|input|catat|simpan|masukkan/.test(lowerAdminMsg);
+      if (isAdminPrice) {
+        const liveReply = await formatHargaPasarReply(message);
+        return res.json({
+          reply: liveReply,
+          extracted: {},
+          isComplete: false,
+          isAdminAction: true,
+          aiProvider: "rule_based",
+          quickReplies: ["🌶️ Detail Petani Cabai", "🧅 Detail Petani Bawang", "📊 Rekap Semua Petani", "📥 Ekspor Sheets"],
+        });
+      }
+
       // Smart Dynamic Fallback for Admin
       const smartFallback = generateSmartAdminFallback(message, activeAdmin, farmersDb, commoditiesDb, currentDraft);
       return res.json({ ...smartFallback, aiProvider: "rule_based" });
@@ -5014,7 +5159,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         "🌾 *Salam Berkah Petani!* Saya Kang Tani AI, asisten digital siap melayani konsultasi pertanian dan pendaftaran lahan ke Google Sheets. Boleh tahu nama Bapak/Ibu, luas lahan, dan komoditas apa yang sedang ditanam?";
 
       if (isPriceIntent) {
-        replyText = `📊 *Informasi Harga Pasar Terkini:*\n• Beras Premium: Rp 16.200/kg\n• Cabai Rawit Merah: Rp 82.000/kg (⚠️ Lonjakan Ekstrem +36.7%)\n• Bawang Merah: Rp 28.500/kg\n• Jagung Pipil: Rp 5.800/kg\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
+        replyText = await formatHargaPasarReply(message);
       } else if (isHamaIntent) {
         replyText = `🌱 *Konsultasi Hama & Pupuk siap!* Ceritakan gejala di lahan (misal: daun menguning, wereng, ulat) + komoditas + luas lahan, nanti Kang Tani kasih takaran dan jadwal aplikasi.`;
       } else if (lower.includes("padi") || lower.includes("cabai") || lower.includes("bawang") || lower.includes("jagung")) {
@@ -5205,7 +5350,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       "🌾 *Salam Berkah Petani!* Pesan Bapak/Ibu telah diterima Kang Tani AI. Boleh disampaikan nama lengkap, luas lahan, dan komoditas apa yang sedang ditanam agar kami catat ke Google Sheets?";
 
     if (isPriceFb) {
-      fallbackReply = `📊 *Informasi Harga Pasar Terkini:*\n• Beras Premium: Rp 16.200/kg\n• Cabai Rawit Merah: Rp 82.000/kg (⚠️ Lonjakan Ekstrem +36.7%)\n• Bawang Merah: Rp 28.500/kg\n• Jagung Pipil: Rp 5.800/kg\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
+      fallbackReply = await formatHargaPasarReply(message);
     } else if (lower.includes("padi") || lower.includes("cabai") || lower.includes("bawang") || lower.includes("jagung")) {
       const crop = lower.includes("cabai")
         ? "Cabai Rawit"
