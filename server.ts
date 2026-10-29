@@ -1372,6 +1372,48 @@ function isAnalyticsQuery(lower: string): boolean {
   );
 }
 
+// Draf WA sisi server: forwarder stateless (tak kirim draf antar-pesan), sehingga
+// pendaftaran multi-pesan via WA tak pernah lengkap tanpa ini. TTL 30 mnt, maks
+// 500 pengirim. Restart = draf hilang (terdokumentasi, bukan bug).
+const waDrafts = new Map<string, { farmer: any; supplier: any; cash: any; stock: any; hpp: any; updatedAt: number }>();
+const WA_DRAFT_TTL_MS = 30 * 60 * 1000;
+function blankWaDraft() { return { farmer: {}, supplier: {}, cash: {}, stock: {}, hpp: {} }; }
+function getWaDraft(phone?: string) {
+  if (!phone) return blankWaDraft();
+  const d = waDrafts.get(phone);
+  if (!d || Date.now() - d.updatedAt > WA_DRAFT_TTL_MS) {
+    if (d) waDrafts.delete(phone);
+    return blankWaDraft();
+  }
+  return d;
+}
+function saveWaDraft(phone: string | undefined, body: any) {
+  if (!phone || !body || typeof body !== "object") return;
+  let d = waDrafts.get(phone);
+  if (!d || Date.now() - d.updatedAt > WA_DRAFT_TTL_MS) {
+    d = { ...blankWaDraft(), updatedAt: 0 };
+  }
+  if (body.clearErpDrafts) { d.cash = {}; d.stock = {}; d.hpp = {}; }
+  if (body.extracted && typeof body.extracted === "object") d.farmer = body.savedRecord ? {} : body.extracted;
+  else if (body.savedRecord) d.farmer = {};
+  if (body.extractedSupplier && typeof body.extractedSupplier === "object") d.supplier = body.savedSupplier ? {} : body.extractedSupplier;
+  else if (body.savedSupplier) d.supplier = {};
+  if (body.extractedCash && typeof body.extractedCash === "object") d.cash = body.savedCash ? {} : body.extractedCash;
+  else if (body.savedCash) d.cash = {};
+  if (body.extractedStock && typeof body.extractedStock === "object") d.stock = body.savedStock ? {} : body.extractedStock;
+  else if (body.savedStock) d.stock = {};
+  if (body.extractedHpp && typeof body.extractedHpp === "object") d.hpp = body.savedHpp ? {} : body.extractedHpp;
+  else if (body.savedHpp) d.hpp = {};
+  d.updatedAt = Date.now();
+  waDrafts.delete(phone);
+  waDrafts.set(phone, d);
+  while (waDrafts.size > 500) {
+    const oldest = waDrafts.keys().next().value;
+    if (oldest === undefined) break;
+    waDrafts.delete(oldest);
+  }
+}
+
 // Router precedence eksplisit (telemetri + dokumen; cabang tetap early-return):
 // batalkan > ERP > supplier > registrasi > analitik > harga > hama > smalltalk > LLM.
 function detectTopIntent(
@@ -4393,7 +4435,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
   app.post("/api/chat", async (req, res) => {
     const raw = req.body || {};
     const message = sanitizeText(raw.message, 2000);
-    const { history, currentDraft, currentSupplierDraft, currentCashDraft, currentStockDraft, currentHppDraft, senderPhone } = raw;
+    let { history, currentDraft, currentSupplierDraft, currentCashDraft, currentStockDraft, currentHppDraft, senderPhone } = raw;
     const ai = getGemini();
 
     // Gerbang ganda: sesi dashboard ATAU forwarder resmi. Self-assert mentah ditolak.
@@ -4411,6 +4453,19 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
 
     const activeAdmin = findAdmin(effPhone);
     const isAdmin = !!activeAdmin;
+
+    // WA stateless: injeksikan draf server per pengirim + rekam draf balasan.
+    // Dashboard (sesi) tak tersentuh: tetap draf sisi klien.
+    if (!sessAdm && fwdOk) {
+      const wd = getWaDraft(senderPhone);
+      if (!currentDraft) currentDraft = wd.farmer;
+      if (!currentSupplierDraft) currentSupplierDraft = wd.supplier;
+      if (!currentCashDraft) currentCashDraft = wd.cash;
+      if (!currentStockDraft) currentStockDraft = wd.stock;
+      if (!currentHppDraft) currentHppDraft = wd.hpp;
+      const origJson = res.json.bind(res);
+      res.json = ((body: any) => { try { saveWaDraft(senderPhone, body); } catch {} return origJson(body); }) as any;
+    }
 
     // 0z. Fast-path smalltalk: 0ms, tanpa LLM/Laya (salam, identitas, makasih, bantuan).
     const hasOpenDraft = [currentDraft, currentCashDraft, currentStockDraft, currentHppDraft, currentSupplierDraft]
