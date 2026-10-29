@@ -131,6 +131,99 @@ const HARGA_ALIAS: Array<{ keys: string[]; match: string[] }> = [
   { keys: ["pupuk"], match: ["pupuk urea", "pupuk npk", "pupuk sp", "pupuk za", "pupuk kcl"] },
 ];
 
+const KOMODITAS_ID: Record<string, number> = {
+  "cabe rawit merah": 50, "cabe merah keriting": 37, "cabe merah besar": 38,
+  "bawang merah": 39, "bawang putih": 49, "jagung pipilan kering": 25,
+  "beras premium": 2, "beras medium": 4,
+  "kacang kedelai lokal": 33, "kacang kedelai impor": 32,
+  "tomat": 46, "kentang": 45, "kol/kubis": 44, "wortel": 47, "buncis": 48,
+  "ketela pohon": 43, "kacang hijau": 41, "kacang tanah": 42,
+  "telur ayam ras": 16, "daging ayam ras": 13,
+  "pupuk urea": 87, "pupuk npk": 85, "pupuk sp": 86, "pupuk za": 88, "pupuk kcl": 84,
+};
+
+interface PasarRow {
+  lokasi: string;
+  harga: number;
+  tanggal: string;
+}
+const pasarKomoditasCache = new Map<number, { at: number; rows: PasarRow[] }>();
+
+async function fetchPasarKomoditas(id: number): Promise<PasarRow[]> {
+  const now = Date.now();
+  const hit = pasarKomoditasCache.get(id);
+  if (hit && now - hit.at < PASAR_TTL_MS) return hit.rows;
+  const d = new Date();
+  const tgl = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    const res = await fetch("https://siskaperbapo.jatimprov.go.id/harga-komoditas", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `komoditas=${id}&tanggal_akhir=${tgl}`,
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    const html = await res.text();
+    const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+    let dates: string[] = [];
+    const rows: PasarRow[] = [];
+    let rm: RegExpExecArray | null;
+    while ((rm = rowRe.exec(html)) !== null) {
+      const cellRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+      const cells: string[] = [];
+      let cm: RegExpExecArray | null;
+      while ((cm = cellRe.exec(rm[1])) !== null) cells.push(stripHtmlTags(cm[1]));
+      if (cells.length < 3) continue;
+      if (/^no$/i.test(cells[0] || "") && /lokasi/i.test(cells[1] || "")) {
+        dates = cells.slice(2);
+        continue;
+      }
+      const lokasi = cells[1] || "";
+      if (!lokasi || /propinsi/i.test(lokasi)) continue;
+      for (let i = cells.length - 1; i >= 2; i--) {
+        const h = parseIdNumber(cells[i] || "");
+        if (h !== undefined) {
+          const rawT = dates[i - 2] || "";
+          const dm = rawT.match(/(\d{4})-(\d{2})-(\d{2})/);
+          rows.push({ lokasi, harga: h, tanggal: dm ? `${dm[3]}-${dm[2]}-${dm[1]}` : rawT });
+          break;
+        }
+      }
+    }
+    if (rows.length > 0) {
+      pasarKomoditasCache.set(id, { at: now, rows });
+      return rows;
+    }
+  } catch (e) {
+    console.log("[HargaPasar] fetch per-pasar gagal:", (e as Error)?.message || e);
+  }
+  if (hit) return hit.rows;
+  return [];
+}
+
+function detectPasar(lower: string): string | null {
+  const m = lower.match(/(?:di\s+)?pasar\s+([a-z][a-z\s]{1,30}?)(?:\?|,|\.|$| dan | tapi | yang | untuk | berapa | harga | dong\b)/);
+  if (m && m[1]) {
+    const c = m[1].trim().replace(/\s+/g, " ");
+    if (c.length >= 3 && !/^(hari ini|sekarang|tersebut|itu|ini|tani)$/.test(c)) return c;
+  }
+  return null;
+}
+
+function normLok(s: string): string {
+  return (s || "").toLowerCase().replace(/[^a-z]/g, "");
+}
+
+function komoditasIdOf(nama: string): number | undefined {
+  const key = (nama || "").toLowerCase().split(" /")[0].replace(/\s*\(.*\)\s*$/, "").trim();
+  for (const [k, id] of Object.entries(KOMODITAS_ID)) {
+    if (key.includes(k)) return id;
+  }
+  return undefined;
+}
+
 function hargaKeyHit(lower: string, key: string): boolean {
   if (key.length <= 3) return new RegExp(`\\b${key}\\b`).test(lower);
   return lower.includes(key);
@@ -154,6 +247,35 @@ async function formatHargaPasarReply(message: string): Promise<string> {
     picks = ["beras premium", "cabe rawit merah", "bawang merah", "jagung pipilan kering"]
       .map(byName)
       .filter((p): p is PasarPrice => !!p);
+  }
+  const pasarQ = detectPasar(lower);
+  if (pasarQ) {
+    const withId = picks
+      .map((p) => ({ p, id: komoditasIdOf(p.nama) }))
+      .filter((x): x is { p: PasarPrice; id: number } => x.id !== undefined);
+    if (withId.length > 0) {
+      const tables = await Promise.all(withId.map((x) => fetchPasarKomoditas(x.id)));
+      const want = normLok(pasarQ);
+      let foundAny = false;
+      const mLines = withId.map((x, idx) => {
+        const rows = tables[idx]
+          .slice()
+          .sort((a, b) => Number(b.lokasi.toLowerCase().startsWith("pasar")) - Number(a.lokasi.toLowerCase().startsWith("pasar")));
+        const hitRow = rows.find((r) => {
+          const a = normLok(r.lokasi);
+          return a.includes(want) || want.includes(a);
+        });
+        if (hitRow) {
+          foundAny = true;
+          const short = x.p.nama.split(" /")[0];
+          return `• ${short} di *${hitRow.lokasi}*: Rp ${hitRow.harga.toLocaleString("id-ID")}/${x.p.satuan} (${hitRow.tanggal})`;
+        }
+        return `• ${x.p.nama}: data pasar tidak ada, rata-rata Jatim Rp ${x.p.harga.toLocaleString("id-ID")}/${x.p.satuan}`;
+      });
+      if (foundAny) {
+        return `📊 *Harga Pasar (${tanggal}):*\n${mLines.join("\n")}\n\n🔎 _Sumber: SISKAPERBAPO Disperindag Jatim_\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
+      }
+    }
   }
   const lines = picks.map((p) => `• ${p.nama}: Rp ${p.harga.toLocaleString("id-ID")}/${p.satuan}`);
   return `📊 *Harga Pasar Jatim (${tanggal}):*\n${lines.join("\n")}\n\n🔎 _Sumber: SISKAPERBAPO Disperindag Jatim_\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
@@ -4927,8 +5049,12 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       // percobaan AI yang gagal (Meta kosong -> 9Router -> fallback) menghabiskan
       // budget sehingga balasan WA tidak terkirim sama sekali.
       const lowerAdminMsgTop = (message || "").toLowerCase();
+      const hasHargaWordTop = /harga|anomali|inflasi/.test(lowerAdminMsgTop);
+      const hasPasarPriceTop =
+        /pasar/.test(lowerAdminMsgTop) &&
+        (/berapa/.test(lowerAdminMsgTop) || HARGA_ALIAS.some((a) => a.keys.some((k) => hargaKeyHit(lowerAdminMsgTop, k))));
       if (
-        /harga|anomali|inflasi|pasar/.test(lowerAdminMsgTop) &&
+        (hasHargaWordTop || hasPasarPriceTop) &&
         !/daftar|tambah|input|catat|simpan|masukkan/.test(lowerAdminMsgTop)
       ) {
         const liveReplyTop = await formatHargaPasarReply(message);
