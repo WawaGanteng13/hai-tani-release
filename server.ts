@@ -1595,6 +1595,11 @@ function isQuerySafeToCache(message: string): boolean {
 
 // LLM kadang membungkus ganda ("reply": "{...}") atau terpotong di tengah JSON.
 // Kembalikan teks balasan bersih; input non-JSON dikembalikan apa adanya.
+// Kupas pagar kode markdown (```json ... ```) dari keluaran LLM agar parser
+// JSON + unwrapNestedReply (termasuk JSON terpotong) bisa bekerja.
+function stripCodeFences(t: string): string {
+  return String(t || "").replace(/^```[a-zA-Z]*\s*\n?/, "").replace(/```\s*$/, "").trim();
+}
 function unwrapNestedReply(text: string): string {
   const t = String(text || "");
   const s = t.trim();
@@ -1871,6 +1876,14 @@ const ADD_WORDS = ["tambah", "daftarkan", "daftar", "input", "masukkan", "catat"
 function isAddRegex(lower: string): boolean {
   for (const w of ADD_WORDS) if ((lower || "").includes(w)) return true;
   return false;
+}
+// Data/pendaftaran petani murni lebih cepat + tepat via jalur deterministik
+// (<100ms) daripada LLM (~2-9 dtk). Pesan yang butuh penalaran (analisis,
+// rekomendasi, tanya) tetap ke LLM; ekstraksi data ditempel terpisah.
+function isDeterministicFarmerData(message: string, regHasMin: boolean): boolean {
+  const lower = String(message || "").toLowerCase();
+  const needsReasoning = /analisis|rekomendasi|prediksi|kenapa|mengapa|bagaimana|kapan|apakah|jelaskan|bandingkan|\?/.test(lower);
+  return (isAddRegex(lower) || regHasMin) && !needsReasoning;
 }
 
 // ---------- ERP Chat: deteksi intent (regex dulu, Laya saat miss) ----------
@@ -2677,8 +2690,10 @@ async function callGeminiGenerate(
   ai: GoogleGenAI,
   contents: any,
   options?: { signal?: AbortSignal; maxOutputTokens?: number; systemInstruction?: string }
-): Promise<string> {
-  const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"];
+): Promise<{ text: string; model: string }> {
+  // lite dulu (1.8 dtk, teruji akurat); 3.5 reasoning (~9 dtk) hanya cadangan.
+  // Keluarga 2.x/2.0 mati untuk kunci baru (404) -> jangan buang waktu retry.
+  const models = ["gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-3.8-flash"];
   let lastErr: any = null;
 
   for (const model of models) {
@@ -2687,11 +2702,16 @@ async function callGeminiGenerate(
     }
     let timer: any = null;
     try {
+      // Pagu khusus Gemini: model reasoning (3.5-flash) memakai jatah output
+      // untuk thinking internal; 550 token hanya menyisakan ~20 token teks
+      // (finish=MAX_TOKENS di 59 karakter). Prompt "padat" tetap menekan
+      // pemakaian aktual; pagu bukan belanja.
+      const geminiBudget = Math.max(options?.maxOutputTokens || 550, 2048);
       const callPromise = ai.models.generateContent({
         model,
         contents,
         config: {
-          maxOutputTokens: options?.maxOutputTokens || 550,
+          maxOutputTokens: geminiBudget,
           abortSignal: options?.signal,
           temperature: 0.2,
           systemInstruction: options?.systemInstruction,
@@ -2702,9 +2722,19 @@ async function callGeminiGenerate(
       });
       const res: any = await Promise.race([callPromise, timeoutPromise]);
       if (timer) clearTimeout(timer);
-      if (res && res.text) {
-        return res.text;
+      // Ekstraksi robust: gabung semua part teks (res.text kadang parsial).
+      let text = "";
+      try {
+        const parts = res?.candidates?.[0]?.content?.parts;
+        if (Array.isArray(parts)) text = parts.map((p: any) => (typeof p?.text === "string" ? p.text : "")).join("");
+      } catch {}
+      if (!text && res && typeof res.text === "string") text = res.text;
+      const finish = res?.candidates?.[0]?.finishReason || "?";
+      if (text) {
+        console.log(`[Gemini] model=${model} chars=${text.length} finish=${finish}`);
+        return { text, model };
       }
+      lastErr = new Error(`Respons kosong dari ${model} (finish=${finish})`);
     } catch (err: any) {
       if (timer) clearTimeout(timer);
       lastErr = err;
@@ -2755,13 +2785,14 @@ async function callUniversalAI(
   }
   chatMessages.push({ role: "user", content: userPrompt });
 
-  // 1. Meta Model API (Muse Spark) bila dikonfigurasi — prioritas untuk hackathon
+  // 1. Meta Model API (Muse Spark) bila dikonfigurasi — prioritas untuk hackathon.
+  // Gagal-cepat 2.5 dtk: endpoint sering timeout; budget forwarder WA hanya 8 dtk.
   if (metaCfg.isConfigured) {
     try {
       const text = await callMetaModelChat(chatMessages, undefined, {
         signal: options?.signal,
         maxTokens: options?.maxOutputTokens || 550,
-        timeoutMs: options?.timeoutMs,
+        timeoutMs: Math.min(options?.timeoutMs || 7000, 2500),
       });
       console.log(`[AI Dispatcher] Balasan via Meta Model API (${metaCfg.model})`);
       return { text, provider: "meta", model: metaCfg.model };
@@ -2808,12 +2839,12 @@ async function callUniversalAI(
       },
     ];
 
-    const text = await callGeminiGenerate(ai, contents, {
+    const g = await callGeminiGenerate(ai, contents, {
       signal: options?.signal,
       maxOutputTokens: options?.maxOutputTokens || 550,
     });
-    console.log(`[AI Dispatcher] Balasan via Google Gemini API`);
-    return { text, provider: "gemini", model: "gemini-3.1-flash-lite" };
+    console.log(`[AI Dispatcher] Balasan via Google Gemini API (${g.model})`);
+    return { text: g.text, provider: "gemini", model: g.model };
   }
 
   throw new Error(
@@ -3840,7 +3871,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
 }`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash",
         contents: [
           {
             role: "user",
@@ -3859,7 +3890,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
         ],
       });
 
-      const responseText = response.text || "";
+      const responseText = stripCodeFences(response.text || "");
       let parsed: any = {};
       try {
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -5325,12 +5356,17 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
       let aiResult: { text: string; provider: "9router" | "gemini" | "meta"; model: string } | null = null;
       try {
-        aiResult = await callUniversalAI(
-          adminSystemInstructions,
-          message,
-          history,
-          { signal: clientAbortController.signal, maxOutputTokens: 550, timeoutMs: 7000 }
-        );
+        const regPre = extractFarmerFromText(message, currentDraft || {});
+        if (isDeterministicFarmerData(message, !!regPre.hasMinimumData)) {
+          console.log("[Admin Chat] bypass LLM: data/pendaftaran petani -> deterministik.");
+        } else {
+          aiResult = await callUniversalAI(
+            adminSystemInstructions,
+            message,
+            history,
+            { signal: clientAbortController.signal, maxOutputTokens: 550, timeoutMs: 7000 }
+          );
+        }
       } catch (err: any) {
         if (isClientAborted || clientAbortController.signal.aborted) {
           console.log("[Admin Chat] AI dibatalkan oleh pengguna (hemat biaya).");
@@ -5344,7 +5380,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
       if (aiResult) {
         try {
-          const responseText = aiResult.text;
+          const responseText = stripCodeFences(aiResult.text);
           let parsed: any;
           try {
             const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -5388,7 +5424,11 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
           // Tolak isComplete palsu: klaim lengkap tanpa satu pun field terisi = abaikan.
           const mergedHasAnyField = !!(merged.nama || merged.noHp || merged.komoditas || merged.luasLahan || merged.alamat || merged.kabupaten);
-          if (isAddRequest || (parsed.isComplete && mergedHasAnyField)) {
+          // Jaring pengaman: data petani yang lolos ke LLM (mis. dibalut pertanyaan)
+          // tetap digabung ke draf; templat draf hanya dipaksa bila tak perlu nalar.
+          const regHasAny = !!reg.hasMinimumData;
+          const wantsReasoning = /analisis|rekomendasi|prediksi|kenapa|mengapa|bagaimana|kapan|apakah|jelaskan|bandingkan|\?/.test(lowerAdminMsg);
+          if ((isAddRequest || regHasAny) && !wantsReasoning || (parsed.isComplete && mergedHasAnyField)) {
             const needFarmerPhone = !merged.noHp;
             if (check.isComplete && !needFarmerPhone) {
               const newRecord = saveFarmerRecord(merged, activeAdmin, activeAdmin.noHp);
@@ -5407,7 +5447,8 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
               delete parsed.savedRecord;
             }
           } else {
-            parsed.extracted = {};
+            // Data + pertanyaan: jawaban LLM dipertahankan, draf ditempel (tak disimpan).
+            parsed.extracted = (isAddRequest || regHasAny) ? merged : {};
             parsed.isComplete = false;
           }
 
@@ -5573,12 +5614,17 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
     let aiResult: { text: string; provider: "9router" | "gemini" | "meta"; model: string } | null = null;
     try {
-      aiResult = await callUniversalAI(
-        systemInstructions,
-        message,
-        history,
-        { signal: clientAbortController.signal, maxOutputTokens: 550, timeoutMs: 7000 }
-      );
+      const regPreF = extractFarmerFromText(message, currentDraft || {});
+      if (isDeterministicFarmerData(message, !!regPreF.hasMinimumData)) {
+        console.log("[Petani Chat] bypass LLM: data/pendaftaran petani -> deterministik.");
+      } else {
+        aiResult = await callUniversalAI(
+          systemInstructions,
+          message,
+          history,
+          { signal: clientAbortController.signal, maxOutputTokens: 550, timeoutMs: 7000 }
+        );
+      }
     } catch (error: any) {
       if (isClientAborted || clientAbortController.signal.aborted) {
         console.log("[Petani Chat] AI dibatalkan oleh pengguna (hemat biaya).");
@@ -5592,7 +5638,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
     if (aiResult) {
       try {
-        const responseText = aiResult.text;
+        const responseText = stripCodeFences(aiResult.text);
         let parsed: any;
         try {
           const jsonMatch = responseText.match(/\{[\s\S]*\}/);
