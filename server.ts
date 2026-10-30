@@ -405,6 +405,61 @@ function writeJsonAtomic(file: string, data: unknown, label: string) {
   }
 }
 
+// ---- Training store: simpan dulu (JSONL append-only lokal, bukan Sheets) ----
+// Satu berkas per hari: data/training/events-YYYY-MM-DD.jsonl (gitignored).
+// Media biner (voice/image) disimpan terpisah di data/training/media/HARI/;
+// JSONL hanya mencatat path relatif + transkrip/hasil analisis.
+// Privasi: nomor pengirim TIDAK disimpan mentah, hanya hash sha256.
+// Tak pernah melempar: kegagalan simpan hanya di-log agar bot tak terpengaruh.
+// Nonaktifkan darurat via env TRAINING_STORE_OFF=1.
+const TRAINING_DIR = path.join(DATA_DIR, "training");
+function hashPhone(p?: string): string {
+  if (!p) return "";
+  try {
+    return crypto.createHash("sha256").update(String(p)).digest("hex");
+  } catch {
+    return "";
+  }
+}
+function clipText(s: any, n = 8000): string {
+  const t = String(s ?? "");
+  return t.length > n ? t.slice(0, n) + "…" : t;
+}
+function trainingLog(entry: Record<string, unknown>): void {
+  try {
+    if (process.env.TRAINING_STORE_OFF === "1") return;
+    if (!fs.existsSync(TRAINING_DIR)) fs.mkdirSync(TRAINING_DIR, { recursive: true });
+    const day = new Date().toISOString().slice(0, 10);
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
+    fs.appendFileSync(path.join(TRAINING_DIR, `events-${day}.jsonl`), line, "utf-8");
+  } catch (err) {
+    console.error("[Training] gagal simpan:", (err as any)?.message || err);
+  }
+}
+// Simpan biner media untuk training; kembalikan path relatif ("" bila gagal).
+function trainingSaveMedia(kind: "voice" | "image", buf: Buffer, mime: string): string {
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    const dir = path.join(TRAINING_DIR, "media", day);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const m = String(mime || "").toLowerCase();
+    const ext = m.includes("png") ? "png"
+      : m.includes("jpeg") || m.includes("jpg") ? "jpg"
+      : m.includes("webp") ? "webp"
+      : m.includes("ogg") ? "ogg"
+      : m.includes("mp3") || m.includes("mpeg") ? "mp3"
+      : m.includes("wav") ? "wav"
+      : kind === "image" ? "jpg" : "webm";
+    const id = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    const rel = `media/${day}/${kind}-${id}.${ext}`;
+    fs.writeFileSync(path.join(TRAINING_DIR, rel), buf);
+    return rel;
+  } catch (err) {
+    console.error("[Training] gagal simpan media:", (err as any)?.message || err);
+    return "";
+  }
+}
+
 // nextId: single source di ./lib/next-id (ada self-check).
 function saveFarmersToDisk() {
   writeJsonAtomic(FARMERS_FILE, farmersDb, "farmers_db.json");
@@ -3713,18 +3768,41 @@ export function createServerApp() {
   });
 
   // POST Audio Transcribe & Entity Extraction (Multimodal AI)
-  app.post("/api/audio-transcribe", requireSession(), async (req, res) => {
+  app.post("/api/audio-transcribe", (req: any, res: any, next: any) => {
+    // Gerbang ganda: sesi dashboard ATAU forwarder resmi (voice WA masuk sini).
+    const s = readSession(req);
+    const adm = s ? adminsDb.find((a) => a.id === s.adminId && a.aktif) : undefined;
+    (req as any).sessionAdmin = adm;
+    const fs = (process.env.FORWARD_SECRET || "").trim();
+    const fwdOk = !!fs && String(req.headers["x-tani-forward-secret"] || "") === fs;
+    if (!adm && !fwdOk) return res.status(401).json({ error: "Butuh login admin atau forwarder resmi." });
+    next();
+  }, async (req, res) => {
+    const t0voice = Date.now();
     try {
       const { audioBase64, mimeType, senderPhone } = req.body;
       if (!audioBase64) {
         return res.status(400).json({ error: "audioBase64 is required" });
       }
+      const fs = (process.env.FORWARD_SECRET || "").trim();
+      const viaFwd = !!fs && String(req.headers["x-tani-forward-secret"] || "") === fs;
+      const cleanBase64 = String(audioBase64).replace(/^data:[^;]+;base64,/, "");
+      const voiceBuf = Buffer.from(cleanBase64, "base64");
+      const mediaPath = trainingSaveMedia("voice", voiceBuf, mimeType || "audio/webm");
 
       const activeAdmin = findAdmin(senderPhone);
+      const farmerHit = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(senderPhone));
+      const voiceBase = {
+        kind: "voice", channel: viaFwd ? "wa" : "dashboard",
+        role: activeAdmin ? "admin" : (farmerHit ? "petani" : "tamu"),
+        phoneHash: hashPhone(senderPhone),
+        mime: String(mimeType || "audio/webm"), bytes: voiceBuf.length, media: mediaPath,
+      };
       const ai = getGemini();
 
       if (!ai) {
         // Tanpa kunci AI valid: jujur katakan tidak tersedia (jangan data palsu).
+        trainingLog({ ...voiceBase, transcript: "", ok: false, error: "kunci AI belum valid", ms: Date.now() - t0voice });
         return res.json({
           transcription: "",
           extracted: {},
@@ -3733,8 +3811,6 @@ export function createServerApp() {
           error: "Layanan transkripsi belum tersedia (kunci AI belum valid). Rekaman tidak diproses.",
         });
       }
-
-      const cleanBase64 = audioBase64.replace(/^data:[^;]+;base64,/, "");
       const prompt = `Dengarkan rekaman audio suara ini dari seorang petani atau petugas pertanian di Indonesia.
 Lakukan:
 1. Transkripsikan apa yang diucapkan secara verbatim dan akurat ke dalam teks bahasa Indonesia.
@@ -3801,6 +3877,11 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
 
       const check = checkFarmerCompleteness(mergedExtracted);
 
+      trainingLog({
+        ...voiceBase, transcript: clipText(parsed.transcription || ""),
+        extractedKeys: Object.keys(mergedExtracted || {}),
+        ok: true, ms: Date.now() - t0voice,
+      });
       res.json({
         transcription: parsed.transcription || "Audio suara berhasil diproses.",
         extracted: mergedExtracted,
@@ -3810,9 +3891,17 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
       });
     } catch (err: any) {
       console.error("[Audio Transcribe Error]", err);
+      try {
+        trainingLog({
+          kind: "voice", channel: "unknown",
+          phoneHash: hashPhone((req.body || {}).senderPhone),
+          transcript: "", ok: false, error: clipText(err?.message || "Internal error", 200),
+          ms: Date.now() - t0voice,
+        });
+      } catch {}
       res.status(500).json({
         error: "Gagal memproses audio suara: " + (err?.message || "Internal error"),
-        transcription: "Halo Kang Tani, saya mau mendata lahan pertanian.",
+        transcription: "",
         extracted: {},
         isComplete: false,
       });
@@ -4755,6 +4844,8 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
   app.post("/api/chat", async (req, res) => {
     const raw = req.body || {};
     const message = sanitizeText(raw.message, 2000);
+    const chatT0 = Date.now();
+    let loggedIntent = "";
     let { history, currentDraft, currentSupplierDraft, currentCashDraft, currentStockDraft, currentHppDraft, senderPhone } = raw;
     const ai = getGemini();
 
@@ -4784,13 +4875,30 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       if (!currentStockDraft) currentStockDraft = wd.stock;
       if (!currentHppDraft) currentHppDraft = wd.hpp;
       const origJson = res.json.bind(res);
-      res.json = ((body: any) => { try { saveWaDraft(senderPhone, body); } catch {} return origJson(body); }) as any;
+      res.json = ((body: any) => {
+        try { saveWaDraft(senderPhone, body); } catch {}
+        const out = origJson(body);
+        try {
+          const farmerHit = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(senderPhone));
+          trainingLog({
+            kind: "chat", channel: "wa",
+            role: isAdmin ? "admin" : (farmerHit ? "petani" : "tamu"),
+            phoneHash: hashPhone(senderPhone),
+            in: clipText(message), out: clipText(body?.reply),
+            provider: String(body?.aiProvider || ""), model: String(body?.aiModel || ""),
+            ms: Date.now() - chatT0, intent: loggedIntent,
+            ok: !body?.error, err: body?.error ? clipText(body.error, 200) : undefined,
+          });
+        } catch {}
+        return out;
+      }) as any;
     }
 
     // 0z. Fast-path smalltalk: 0ms, tanpa LLM/Laya (salam, identitas, makasih, bantuan).
     const hasOpenDraft = [currentDraft, currentCashDraft, currentStockDraft, currentHppDraft, currentSupplierDraft]
       .some((d) => d && typeof d === "object" && Object.keys(d).length > 0);
     const topIntent = detectTopIntent(message, isAdmin, activeAdmin, effPhone, hasOpenDraft);
+    loggedIntent = topIntent;
     console.log(`[ChatRoute] intent=${topIntent} admin=${isAdmin} len=${String(message || "").length}`);
     const fast = handleFastSmalltalk(message, isAdmin, activeAdmin, effPhone, hasOpenDraft);
     if (fast) return res.json({ ...fast, aiProvider: "fast_path" } as any);
