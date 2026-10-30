@@ -43,6 +43,54 @@ function pickIncoming(value: any): { from: string; text: string } | null {
     return null;
   }
 }
+// Media WA (voice note = audio, foto = image). Stiker/dokumen/video diabaikan
+// (pipe mentah tetap jalan; tanpa balasan otomatis).
+function pickMedia(value: any): { from: string; kind: "voice" | "image"; mediaId: string; mime: string; waId: string; caption: string } | null {
+  try {
+    const msg = value?.messages?.[0];
+    if (!msg) return null;
+    const from = String(msg.from || "");
+    const businessNumber = String(value?.metadata?.display_phone_number || "");
+    if (!from || (businessNumber && from === businessNumber)) return null; // anti-loop
+    if (msg.type === "audio" && msg.audio?.id) {
+      return { from, kind: "voice", mediaId: String(msg.audio.id), mime: String(msg.audio.mime_type || "audio/ogg"), waId: String(msg.id || ""), caption: "" };
+    }
+    if (msg.type === "image" && msg.image?.id) {
+      return { from, kind: "image", mediaId: String(msg.image.id), mime: String(msg.image.mime_type || "image/jpeg"), waId: String(msg.id || ""), caption: String(msg.image.caption || "").slice(0, 500) };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+async function downloadWaMedia(mediaId: string): Promise<{ buf: Buffer; mime: string } | null> {
+  const token = (process.env.WHATSAPP_TOKEN || "").trim();
+  if (!token || !mediaId) return null;
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 4000);
+  try {
+    const meta = await fetch(`https://graph.facebook.com/v24.0/${mediaId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: ctl.signal,
+    });
+    if (!meta.ok) return null;
+    const mj: any = await meta.json().catch(() => null);
+    const url = String(mj?.url || "");
+    if (!url) return null;
+    const dl = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: ctl.signal,
+    });
+    if (!dl.ok) return null;
+    const ab = await dl.arrayBuffer();
+    if (!ab || ab.byteLength === 0 || ab.byteLength > 3 * 1024 * 1024) return null;
+    return { buf: Buffer.from(ab), mime: String(mj?.mime_type || "") };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
 async function sendWaReply(to: string, body: string): Promise<boolean> {
   const token = (process.env.WHATSAPP_TOKEN || "").trim();
   const phoneId = (process.env.PHONE_NUMBER_ID || "").trim();
@@ -108,13 +156,17 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
   try {
   // Pipe + chat diminta paralel sejak awal: total ≈ max(pipe, chat), bukan jumlah.
   let inc: { from: string; text: string } | null = null;
+  let med: { from: string; kind: "voice" | "image"; mediaId: string; mime: string; waId: string; caption: string } | null = null;
   try {
     const payload = JSON.parse(raw.toString("utf-8"));
-    inc = pickIncoming(payload?.entry?.[0]?.changes?.[0]?.value);
+    const val = payload?.entry?.[0]?.changes?.[0]?.value;
+    inc = pickIncoming(val);
+    if (!inc) med = pickMedia(val);
     const eid = String(payload?.entry?.[0]?.id || "");
-    if (eid) console.log(`[wa-fwd] waba=${eid} from=${inc?.from || "-"} msglen=${(inc?.text || "").length}`);
+    if (eid) console.log(`[wa-fwd] waba=${eid} from=${inc?.from || med?.from || "-"} msglen=${(inc?.text || "").length} med=${med ? med.kind + ":" + med.mediaId.slice(0, 12) : "-"}`);
   } catch {
     inc = null;
+    med = null;
   }
   const pipeP = fetch(backend + "/api/webhook/whatsapp", {
     method: "POST",
@@ -143,6 +195,40 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
         }
       })()
     : Promise.resolve(null);
+  // Media: unduh dari Graph lalu lempar ke backend /api/wa-media (paralel dgn pipe).
+  const medP: Promise<any> = med
+    ? (async () => {
+        const dl = await downloadWaMedia((med as any).mediaId);
+        if (!dl) {
+          console.error("[wa-media] unduh gagal/terlalu besar (>3MB)");
+          return null;
+        }
+        const mCtl = new AbortController();
+        const mBudget = Math.max(2000, Math.min(7000, remaining() - 1500));
+        const mT = setTimeout(() => mCtl.abort(), mBudget);
+        try {
+          const mr = await fetch(backend + "/api/wa-media", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-tani-forward-secret": fwd },
+            body: JSON.stringify({
+              kind: (med as any).kind,
+              base64: dl.buf.toString("base64"),
+              mimeType: (med as any).mime || dl.mime,
+              senderPhone: (med as any).from,
+              waId: (med as any).waId,
+              caption: (med as any).caption || "",
+            }),
+            signal: mCtl.signal,
+          });
+          if (!mr.ok) return null;
+          return await mr.json().catch(() => null);
+        } catch {
+          return null;
+        } finally {
+          clearTimeout(mT);
+        }
+      })()
+    : Promise.resolve(null);
   let up: any;
   try {
     up = await pipeP;
@@ -156,18 +242,19 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
     up.text(),
     new Promise<string>((_, rej) => setTimeout(() => rej(new Error("body-timeout")), remaining())),
   ]).catch(() => "");
-  if (up.ok && inc && remaining() > 500) {
+  const respondent = inc ? { to: inc.from, p: chatP } : med ? { to: med.from, p: medP } : null;
+  if (up.ok && respondent && remaining() > 500) {
     try {
-      const chatJson = await Promise.race([
-        chatP.catch(() => null),
+      const ansJson = await Promise.race([
+        respondent.p.catch(() => null),
         new Promise((res) => setTimeout(() => res(null), Math.max(0, remaining() - 500))),
       ]);
-      if (!chatJson) console.error("[wa-reply] chat kosong/timeout, balasan tidak dikirim");
-      const reply = String((chatJson && chatJson.reply) || "").trim();
+      if (!ansJson) console.error("[wa-reply] chat/media kosong/timeout, balasan tidak dikirim");
+      const reply = String((ansJson && ansJson.reply) || "").trim();
       // Jangan teruskan pesan error gerbang sebagai balasan WA.
       if (reply && !/sesi dashboard berakhir/i.test(reply) && remaining() > 1500) {
         await Promise.race([
-          sendWaReply(inc.from, reply),
+          sendWaReply(respondent.to, reply),
           new Promise((res) => setTimeout(() => res(false), Math.max(0, remaining() - 500))),
         ]);
       }

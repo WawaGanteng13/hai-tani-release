@@ -1703,6 +1703,90 @@ function handleFastSmalltalk(
   return null;
 }
 
+// ---- Media AI bersama (dipakai /api/audio-transcribe + /api/wa-media) ----
+const MEDIA_VISION_MODEL = "gemini-3.1-flash-lite"; // multimodal tercepat, teruji akurat
+async function transcribeAudioBuffer(buf: Buffer, mime: string): Promise<{ transcription: string; extracted: any }> {
+  const ai = getGemini();
+  if (!ai) throw new Error("kunci AI belum valid");
+  const prompt = `Dengarkan rekaman audio suara ini dari seorang petani atau petugas pertanian di Indonesia.
+Lakukan:
+1. Transkripsikan apa yang diucapkan secara verbatim dan akurat ke dalam teks bahasa Indonesia.
+2. Analisis dan ekstrak data petani jika ada:
+   - nama: nama petani (misal: "Pak Suparman", "Pak Ahmad", "Ibu Siti")
+   - komoditas: tanaman pangan / hortikultura (misal: "Padi", "Jagung", "Cabai Rawit", "Bawang Merah")
+   - varietas: varietas jika disebutkan (misal: "Ciherang", "Inpari 32", "Bisi 18")
+   - luasLahan: angka dalam Hektar (misal 1.5 atau 0.5 atau jika dalam m2 konversi ke Ha)
+   - luasLahanFormatted: teks string (misal: "1.5 Ha")
+   - kabupaten: nama kabupaten/kota jika ada (misal: "Subang", "Karawang")
+   - alamat: desa atau kecamatan jika ada
+   - estimasiPanen: bulan atau waktu perkiraan panen jika disebutkan
+
+Kembalikan HANYA format JSON valid tanpa tanda markdown:
+{
+  "transcription": "teks ucapan dalam rekaman",
+  "extracted": {
+    "nama": "nama atau null",
+    "komoditas": "komoditas atau null",
+    "varietas": "varietas atau null",
+    "luasLahan": null,
+    "luasLahanFormatted": null,
+    "alamat": null,
+    "kabupaten": null,
+    "estimasiPanen": null
+  }
+}`;
+  const response = await ai.models.generateContent({
+    model: MEDIA_VISION_MODEL,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { inlineData: { mimeType: mime || "audio/webm", data: buf.toString("base64") } },
+          { text: prompt },
+        ],
+      },
+    ],
+  });
+  const responseText = stripCodeFences((response as any).text || "");
+  let parsed: any = {};
+  try {
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : responseText);
+  } catch {
+    parsed = { transcription: responseText.trim(), extracted: {} };
+  }
+  // Also run rule-based extractor on the transcribed text for high recall
+  const ruleBased = extractFarmerFromText(parsed.transcription || "", {});
+  return {
+    transcription: parsed.transcription || "",
+    extracted: { ...(parsed.extracted || {}), ...(ruleBased.extracted || {}) },
+  };
+}
+async function analyzeImageBuffer(buf: Buffer, mime: string, caption = ""): Promise<string> {
+  const ai = getGemini();
+  if (!ai) throw new Error("kunci AI belum valid");
+  const cap = String(caption || "").trim().slice(0, 500);
+  const prompt = `Kamu Kang Tani AI, asisten pertanian Indonesia di WhatsApp.
+Deskripsikan foto ini singkat (maksimal 5 baris/bullet):
+1. Apa isi foto (tanaman/hewan/lahan/dokumen/lainnya)?
+2. Jika tanaman: kemungkinan komoditas + gejala hama/penyakit/kekurangan unsur yang terlihat (atau "tampak sehat" bila tak ada gejala jelas).
+3. Satu saran tindak lanjut paling relevan (atau pertanyaan klarifikasi bila foto tak jelas).
+${cap ? `Konteks dari pengirim: "${cap}"\n` : ""}Jawab bahasa Indonesia santai-profesional, format WhatsApp (*bold*, bullet •). Tanpa pagar kode.`;
+  const response = await ai.models.generateContent({
+    model: MEDIA_VISION_MODEL,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { inlineData: { mimeType: mime || "image/jpeg", data: buf.toString("base64") } },
+          { text: prompt },
+        ],
+      },
+    ],
+  });
+  return stripCodeFences((response as any).text || "").trim();
+}
+
 // Predikat intent bersama (satu-satunya sumber kebenaran; dipakai router + cabang).
 function isRegistrationQuery(lower: string): boolean {
   return /daft[a-z]*|tambah(kan)?|input|masukkan|catat|simpan/.test(lower || "");
@@ -3185,7 +3269,10 @@ function processHppGenerate(data: any): { status: number; body: any } {
 
 export function createServerApp() {
   const app = express();
-  app.use(express.json({ limit: "1mb", verify: (req: any, _res: any, buf: Buffer) => { if (req.url?.startsWith("/api/webhook/whatsapp")) req.rawBody = buf; } }));
+  const json1mb = express.json({ limit: "1mb", verify: (req: any, _res: any, buf: Buffer) => { if (req.url?.startsWith("/api/webhook/whatsapp")) req.rawBody = buf; } });
+  // /api/wa-media membawa base64 media (s.d. ~5MB) -> parser 6MB khusus rute itu.
+  app.use("/api/wa-media", express.json({ limit: "6mb" }));
+  app.use((req, res, next) => ((req.url || "").startsWith("/api/wa-media") ? next() : json1mb(req, res, next)));
   // ponytail: header minimal tanpa dep; tambah helmet saat production.
   app.use((_req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -3842,79 +3929,17 @@ export function createServerApp() {
           error: "Layanan transkripsi belum tersedia (kunci AI belum valid). Rekaman tidak diproses.",
         });
       }
-      const prompt = `Dengarkan rekaman audio suara ini dari seorang petani atau petugas pertanian di Indonesia.
-Lakukan:
-1. Transkripsikan apa yang diucapkan secara verbatim dan akurat ke dalam teks bahasa Indonesia.
-2. Analisis dan ekstrak data petani jika ada:
-   - nama: nama petani (misal: "Pak Suparman", "Pak Ahmad", "Ibu Siti")
-   - komoditas: tanaman pangan / hortikultura (misal: "Padi", "Jagung", "Cabai Rawit", "Bawang Merah")
-   - varietas: varietas jika disebutkan (misal: "Ciherang", "Inpari 32", "Bisi 18")
-   - luasLahan: angka dalam Hektar (misal 1.5 atau 0.5 atau jika dalam m2 konversi ke Ha)
-   - luasLahanFormatted: teks string (misal: "1.5 Ha")
-   - kabupaten: nama kabupaten/kota jika ada (misal: "Subang", "Karawang")
-   - alamat: desa atau kecamatan jika ada
-   - estimasiPanen: bulan atau waktu perkiraan panen jika disebutkan
-
-Kembalikan HANYA format JSON valid tanpa tanda markdown:
-{
-  "transcription": "teks ucapan dalam rekaman",
-  "extracted": {
-    "nama": "nama atau null",
-    "komoditas": "komoditas atau null",
-    "varietas": "varietas atau null",
-    "luasLahan": null,
-    "luasLahanFormatted": null,
-    "alamat": null,
-    "kabupaten": null,
-    "estimasiPanen": null
-  }
-}`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                inlineData: {
-                  mimeType: mimeType || "audio/webm",
-                  data: cleanBase64,
-                },
-              },
-              {
-                text: prompt,
-              },
-            ],
-          },
-        ],
-      });
-
-      const responseText = stripCodeFences(response.text || "");
-      let parsed: any = {};
-      try {
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        parsed = JSON.parse(jsonMatch ? jsonMatch[0] : responseText);
-      } catch {
-        parsed = { transcription: responseText.trim(), extracted: {} };
-      }
-
-      // Also run rule-based extractor on the transcribed text for high recall
-      const ruleBased = extractFarmerFromText(parsed.transcription || "", {});
-      const mergedExtracted = {
-        ...(parsed.extracted || {}),
-        ...(ruleBased.extracted || {}),
-      };
-
+      const tr = await transcribeAudioBuffer(voiceBuf, mimeType || "audio/webm");
+      const mergedExtracted = tr.extracted;
       const check = checkFarmerCompleteness(mergedExtracted);
 
       trainingLog({
-        ...voiceBase, transcript: clipText(parsed.transcription || ""),
+        ...voiceBase, transcript: clipText(tr.transcription || ""),
         extractedKeys: Object.keys(mergedExtracted || {}),
         ok: true, ms: Date.now() - t0voice,
       });
       res.json({
-        transcription: parsed.transcription || "Audio suara berhasil diproses.",
+        transcription: tr.transcription || "Audio suara berhasil diproses.",
         extracted: mergedExtracted,
         isComplete: check.isComplete,
         missingFields: check.missingFields,
@@ -3936,6 +3961,116 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
         extracted: {},
         isComplete: false,
       });
+    }
+  });
+
+  // POST media WA dari forwarder: voice ditranskrip lalu dijawab via /api/chat
+  // internal; image dianalisis langsung. Media SELALU disimpan ke training store
+  // dulu (simpan-dulu), recognition best-effort dengan jawaban jujur saat gagal.
+  app.post("/api/wa-media", (req: any, res: any, next: any) => {
+    const s = readSession(req);
+    const adm = s ? adminsDb.find((a) => a.id === s.adminId && a.aktif) : undefined;
+    (req as any).sessionAdmin = adm;
+    const fs = (process.env.FORWARD_SECRET || "").trim();
+    const fwdOk = !!fs && String(req.headers["x-tani-forward-secret"] || "") === fs;
+    if (!adm && !fwdOk) return res.status(401).json({ error: "Butuh login admin atau forwarder resmi." });
+    next();
+  }, async (req, res) => {
+    const t0m = Date.now();
+    try {
+      const { kind, base64, mimeType, senderPhone, waId, caption } = req.body || {};
+      if (kind !== "voice" && kind !== "image") {
+        return res.status(400).json({ error: "kind harus voice|image" });
+      }
+      if (!base64 || typeof base64 !== "string") {
+        return res.status(400).json({ error: "base64 is required" });
+      }
+      const buf = Buffer.from(base64, "base64");
+      if (buf.length === 0 || buf.length > 5 * 1024 * 1024) {
+        return res.status(413).json({ error: "ukuran media 1B..5MB" });
+      }
+      const mediaPath = trainingSaveMedia(kind, buf, mimeType || (kind === "image" ? "image/jpeg" : "audio/ogg"));
+      const activeAdmin = findAdmin(senderPhone);
+      const farmerHit = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(senderPhone));
+      const mBase = {
+        kind, channel: "wa",
+        role: activeAdmin ? "admin" : (farmerHit ? "petani" : "tamu"),
+        phoneHash: hashPhone(senderPhone),
+        mime: String(mimeType || ""), bytes: buf.length, media: mediaPath,
+        waId: String(waId || ""),
+      };
+      if (kind === "voice") {
+        let tr: { transcription: string; extracted: any };
+        try {
+          tr = await transcribeAudioBuffer(buf, mimeType || "audio/ogg");
+        } catch (err: any) {
+          trainingLog({ ...mBase, transcript: "", ok: false, error: clipText(err?.message || "gagal", 200), ms: Date.now() - t0m });
+          return res.json({
+            ok: false, kind, transcription: "", savedMedia: mediaPath,
+            reply: "🎙️ Voice note tersimpan. Transkripsi otomatis belum tersedia saat ini — silakan ketik pesan teks.",
+            aiProvider: "rule_based", ms: Date.now() - t0m,
+          });
+        }
+        const transcript = (tr.transcription || "").trim();
+        trainingLog({
+          ...mBase, transcript: clipText(transcript),
+          extractedKeys: Object.keys(tr.extracted || {}), ok: true, ms: Date.now() - t0m,
+        });
+        if (!transcript) {
+          return res.json({
+            ok: true, kind, transcription: "", savedMedia: mediaPath,
+            reply: "🎙️ Voice note diterima tapi tidak terdengar jelas. Coba kirim ulang dengan suara lebih jelas, atau ketik pesan teks.",
+            aiProvider: "rule_based", ms: Date.now() - t0m,
+          });
+        }
+        // Teruskan transkrip ke mesin chat via self-call (jawab seperti pesan teks).
+        try {
+          const port = String(process.env.PORT || "3000");
+          const fs = (process.env.FORWARD_SECRET || "").trim();
+          const cr = await fetch(`http://127.0.0.1:${port}/api/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-tani-forward-secret": fs },
+            body: JSON.stringify({ message: transcript.slice(0, 1000), senderPhone }),
+            signal: AbortSignal.timeout(7000),
+          });
+          const cj: any = await cr.json().catch(() => null);
+          const reply = String(cj?.reply || "").trim();
+          if (reply) {
+            return res.json({
+              ok: true, kind, transcription: transcript, savedMedia: mediaPath,
+              reply, aiProvider: String(cj.aiProvider || "rule_based"), ms: Date.now() - t0m,
+            });
+          }
+          throw new Error("chat kosong");
+        } catch {
+          return res.json({
+            ok: true, kind, transcription: transcript, savedMedia: mediaPath,
+            reply: `🎙️ Transkrip: "${transcript.slice(0, 500)}"\n\nMaaf, layanan jawab sedang sibuk — coba kirim ulang sebagai teks.`,
+            aiProvider: "rule_based", ms: Date.now() - t0m,
+          });
+        }
+      }
+      // kind === "image"
+      let analysis = "";
+      try {
+        analysis = await analyzeImageBuffer(buf, mimeType || "image/jpeg", String(caption || ""));
+      } catch (err: any) {
+        trainingLog({ ...mBase, caption: String(caption || "").slice(0, 500), analysis: "", ok: false, error: clipText(err?.message || "gagal", 200), ms: Date.now() - t0m });
+        return res.json({
+          ok: false, kind, analysis: "", savedMedia: mediaPath,
+          reply: "🖼️ Foto tersimpan. Analisis gambar belum tersedia saat ini — coba kirim ulang nanti.",
+          aiProvider: "rule_based", ms: Date.now() - t0m,
+        });
+      }
+      if (!analysis.trim()) analysis = "🖼️ Foto diterima tapi belum bisa dianalisis. Coba kirim foto yang lebih jelas.";
+      trainingLog({ ...mBase, caption: String(caption || "").slice(0, 500), analysis: clipText(analysis), ok: true, ms: Date.now() - t0m });
+      return res.json({
+        ok: true, kind, analysis, savedMedia: mediaPath,
+        reply: analysis, aiProvider: "gemini", ms: Date.now() - t0m,
+      });
+    } catch (err: any) {
+      console.error("[WA Media Error]", err?.message || err);
+      return res.status(500).json({ error: "Gagal memproses media: " + (err?.message || "Internal error") });
     }
   });
 
