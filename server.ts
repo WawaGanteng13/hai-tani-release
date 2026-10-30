@@ -203,11 +203,27 @@ async function fetchPasarKomoditas(id: number): Promise<PasarRow[]> {
   return [];
 }
 
+const PILOT_MARKETS: Array<{ keys: string[]; display: string }> = [
+  { keys: ["karangploso", "karang ploso"], display: "Pasar Karang Ploso" },
+  { keys: ["songgoriti"], display: "Pasar Songgoriti" },
+  { keys: ["gentengan"], display: "Pasar Gentengan" },
+  { keys: ["pesanggrahan"], display: "Pasar Pesanggrahan" },
+  { keys: ["dinoyo"], display: "Pasar Dinoyo" },
+  { keys: ["blimbing"], display: "Pasar Blimbing" },
+  { keys: ["tawangmangu"], display: "Pasar Tawangmangu" },
+  { keys: ["ororodowo", "oro-oro dowo", "oro oro dowo"], display: "Pasar Oro-oro Dowo" },
+  { keys: ["klojen"], display: "Pasar Klojen" },
+];
+
 function detectPasar(lower: string): string | null {
   const m = lower.match(/(?:di\s+)?pasar\s+([a-z][a-z\s]{1,30}?)(?:\?|,|\.|$| dan | tapi | yang | untuk | berapa | harga | dong\b)/);
   if (m && m[1]) {
     const c = m[1].trim().replace(/\s+/g, " ");
     if (c.length >= 3 && !/^(hari ini|sekarang|tersebut|itu|ini|tani)$/.test(c)) return c;
+  }
+  const flat = (lower || "").toLowerCase();
+  for (const pm of PILOT_MARKETS) {
+    if (pm.keys.some((k) => flat.includes(k))) return pm.display;
   }
   return null;
 }
@@ -967,6 +983,8 @@ function isSupplierIntent(text: string): boolean {
     lower.includes("penyedia alsintan") ||
     lower.includes("offtaker") ||
     lower.includes("pengepul") ||
+    lower.includes("tengkulak") ||
+    lower.includes("pemasok") ||
     lower.includes("koperasi tani") ||
     lower.includes("penggilingan beras") ||
     lower.includes("toko benih") ||
@@ -1295,7 +1313,7 @@ function generateSmartAdminFallback(
       extracted: {},
       isComplete: false,
       isAdminAction: true,
-      quickReplies: ["📢 Kirim Broadcast Sekarang", "📊 Rekap Semua Petani", "🌶️ Analisis Harga Cabai", "📥 Ekspor Sheets"],
+      quickReplies: ["⚠️ Cek Belum Verifikasi", "📊 Rekap Semua Petani", "🌶️ Analisis Harga Cabai", "📥 Ekspor Sheets"],
     };
   }
 
@@ -1565,7 +1583,7 @@ function handleFastSmalltalk(
   if (!clean || clean.length > 40) return null;
   const bare = (re: RegExp) => re.test(clean);
   // Salam — admin: ringkasan eksekutif yang sama via fallback deterministik.
-  if (bare(/^(halo+|hallo+|hai+|hi+|hei+|pagi+|siang|sore|malam|assalamu'?alaikum|punten|sampurasun|permisi)[?!.\s]*$/)) {
+  if (bare(/^(halo+|hallo+|hai+|hi+|hei+|pagi+|siang|sore|malam|selamat (pagi|siang|sore|malam)|assalamu'?alaikum|punten|sampurasun|permisi)[?!.\s]*$/)) {
     if (isAdmin && activeAdmin) {
       const fb: any = generateSmartAdminFallback(message, activeAdmin, farmersDb, commoditiesDb, {});
       return { reply: String(fb.reply || ""), quickReplies: fb.quickReplies || [], extracted: {}, isComplete: false, isAdminAction: true };
@@ -1600,7 +1618,7 @@ function handleFastSmalltalk(
     };
   }
   // Makasih/oke — mengalah bila ada draf terbuka.
-  if (!hasOpenDraft && clean.length <= 30 && bare(/^(makasih|terima kasih|thanks?|thank you|oke+|ok+|okay|siap+|baik+|mantap+|sip+)[!.\s]*$/)) {
+  if (!hasOpenDraft && clean.length <= 30 && bare(/^(makasih|terima kasih|thanks?|thank you|oke+|ok+|okay|siap+|baik+|mantap+|sip+)( banyak| banget)?[!.\s]*$/)) {
     return {
       reply: isAdmin ? "Sama-sama, Bpk/Ibu! 🙏 Ada lagi yang bisa saya bantu?" : "Sama-sama! 🙏 Ada lagi yang bisa saya bantu?",
       quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "🌶️ Analisis Anomali Cabai"] : ["Cek Harga Pasar Hari Ini", "Konsultasi Hama Tanaman"],
@@ -1660,6 +1678,20 @@ function getWaDraft(phone?: string) {
   }
   return d;
 }
+// Sanitasi nilai-hampa saat menyimpan draf: penulis draf kerap mengembalikan
+// objek bentuk-penuh (mis. { farmerId: undefined } dari "catat kas" telanjang)
+// yang hilang di JSON tapi terhitung Object.keys -> hasOpenDraft macet-true
+// sementara cancel tak melihatnya. Selaraskan dengan semantik draftScore /
+// draftHasAny: undefined/null/"" dianggap absen. Array tak pernah draf valid.
+function cleanStoredDraft(o: any): any {
+  if (!o || typeof o !== "object" || Array.isArray(o)) return {};
+  const c: any = {};
+  for (const k of Object.keys(o)) {
+    const v = (o as any)[k];
+    if (v !== undefined && v !== null && v !== "") c[k] = v;
+  }
+  return c;
+}
 function saveWaDraft(phone: string | undefined, body: any) {
   if (!phone || !body || typeof body !== "object") return;
   let d = waDrafts.get(phone);
@@ -1668,15 +1700,16 @@ function saveWaDraft(phone: string | undefined, body: any) {
   }
   if (body.clearErpDrafts) { d.cash = {}; d.stock = {}; d.hpp = {}; }
   if (body.clearFarmerDraft) { d.farmer = {}; }
-  if (body.extracted && typeof body.extracted === "object") d.farmer = body.savedRecord ? {} : body.extracted;
+  if (body.clearSupplierDraft) { d.supplier = {}; }
+  if (body.extracted && typeof body.extracted === "object") d.farmer = body.savedRecord ? {} : cleanStoredDraft(body.extracted);
   else if (body.savedRecord) d.farmer = {};
-  if (body.extractedSupplier && typeof body.extractedSupplier === "object") d.supplier = body.savedSupplier ? {} : body.extractedSupplier;
+  if (body.extractedSupplier && typeof body.extractedSupplier === "object") d.supplier = body.savedSupplier ? {} : cleanStoredDraft(body.extractedSupplier);
   else if (body.savedSupplier) d.supplier = {};
-  if (body.extractedCash && typeof body.extractedCash === "object") d.cash = body.savedCash ? {} : body.extractedCash;
+  if (body.extractedCash && typeof body.extractedCash === "object") d.cash = body.savedCash ? {} : cleanStoredDraft(body.extractedCash);
   else if (body.savedCash) d.cash = {};
-  if (body.extractedStock && typeof body.extractedStock === "object") d.stock = body.savedStock ? {} : body.extractedStock;
+  if (body.extractedStock && typeof body.extractedStock === "object") d.stock = body.savedStock ? {} : cleanStoredDraft(body.extractedStock);
   else if (body.savedStock) d.stock = {};
-  if (body.extractedHpp && typeof body.extractedHpp === "object") d.hpp = body.savedHpp ? {} : body.extractedHpp;
+  if (body.extractedHpp && typeof body.extractedHpp === "object") d.hpp = body.savedHpp ? {} : cleanStoredDraft(body.extractedHpp);
   else if (body.savedHpp) d.hpp = {};
   d.updatedAt = Date.now();
   waDrafts.delete(phone);
@@ -2644,6 +2677,7 @@ async function callUniversalAI(
   const metaCfg = getMetaModelConfig();
   const nineRouterCfg = getNineRouterConfig();
   let nineRouterErr: any = null;
+  let metaErr: any = null;
 
   // Compact conversation history: keep only last 2-3 exchanges, trim length
   const compactHistory = (history || [])
@@ -2678,7 +2712,7 @@ async function callUniversalAI(
       return { text, provider: "meta", model: metaCfg.model };
     } catch (err: any) {
       if (options?.signal?.aborted) throw err;
-      nineRouterErr = err;
+      metaErr = err;
       console.warn(`[Meta Model API Warning] Pemanggilan Meta gagal (${err.message}). Beralih ke 9Router...`);
     }
   }
@@ -2728,8 +2762,8 @@ async function callUniversalAI(
   }
 
   throw new Error(
-    nineRouterErr
-      ? `Meta/9Router gagal (${nineRouterErr.message}) dan Gemini API tidak tersedia`
+    metaErr || nineRouterErr
+      ? `AI gagal (Meta: ${metaErr?.message || "tidak dicoba"}; 9Router: ${nineRouterCfg.url || nineRouterCfg.key ? nineRouterErr?.message || "tidak dicoba" : "tidak dikonfigurasi"}; Gemini: ${getGemini() ? "gagal" : "tidak tersedia"})`
       : "Tidak ada provider AI yang aktif (META_MODEL_KEY, NINEROUTER_URL, atau GEMINI_API_KEY belum diisi)"
   );
 }
@@ -3690,16 +3724,13 @@ export function createServerApp() {
       const ai = getGemini();
 
       if (!ai) {
-        // Fallback jika API key Gemini belum diisi
+        // Tanpa kunci AI valid: jujur katakan tidak tersedia (jangan data palsu).
         return res.json({
-          transcription: "Halo Kang Tani, saya mau daftarkan lahan pertanian seluas 1.5 hektar di desa binaan.",
-          extracted: {
-            luasLahan: 1.5,
-            luasLahanFormatted: "1.5 Ha",
-            komoditas: "Padi",
-          },
+          transcription: "",
+          extracted: {},
           isComplete: false,
           isFallback: true,
+          error: "Layanan transkripsi belum tersedia (kunci AI belum valid). Rekaman tidak diproses.",
         });
       }
 
@@ -4669,7 +4700,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
 
       return {
         reply: `📋 *Daftar Petani Menunggu Verifikasi Lapangan (${unverified.length} Petani):*\n\n${listText}\n\n💡 Admin dapat memverifikasi langsung melalui tombol aksi atau di tab Google Sheets.`,
-        quickReplies: ["Verifikasi Semua", "Broadcast PPL", "Buka Google Sheets"],
+        quickReplies: ["Verifikasi Semua", "📊 Rekap Semua Petani", "⚠️ Cek Belum Verifikasi"],
       };
     }
 
@@ -4784,12 +4815,86 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       }
     });
 
+    // 0a-cancel. Batalkan telanjang ("batalkan", "batalkan semuanya"): bersihkan
+    // SEMUA draf (petani/supplier/kas/stok/HPP) sekaligus. Tanpa ini, cancel
+    // per-tipe berhenti di tipe pertama dan sisa draf menahan smalltalk via
+    // hasOpenDraft. Cancel bertipe ("batalkan kas") tetap ke cabang masing-masing.
+    {
+      const bareCancel = /^\s*batal(kan|in)?\s*(semuanya|semua|aja|saja|dulu|deh|dong)?\s*[!.\s]*$/i.test(message || "");
+      if (bareCancel) {
+        return res.json({
+          reply: hasOpenDraft
+            ? "Baik, semua draf dibatalkan (pendaftaran petani/supplier/kas/stok/HPP). Ketik *daftar* atau *catat kas* kapan pun untuk memulai lagi."
+            : "Tidak ada draf terbuka yang perlu dibatalkan. Ketik *bantuan* untuk melihat perintah yang tersedia.",
+          quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "Daftarkan Petani"] : ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini"],
+          extracted: {}, extractedSupplier: {}, extractedCash: {}, extractedStock: {}, extractedHpp: {},
+          clearFarmerDraft: true, clearSupplierDraft: true, clearErpDrafts: true,
+          isComplete: true, isAdminAction: isAdmin, aiProvider: "rule_based",
+        } as any);
+      }
+    }
+
     // 0a0. ERP Kas/Stok/HPP intent (deterministik, semua provider AI). Regex dulu
     // (0ms), Laya saat regex miss, draf terbuka untuk jawaban lanjutan. Dieksekusi
     // via fungsi tulis bersama. Diprioritaskan sebelum supplier agar ujaran stok
     // ("urea keluar ... kios ...") tidak dimakan alur pendaftaran kios.
     {
       const erpLower = (message || "").toLowerCase();
+      if (/contoh format/i.test(message || "")) {
+        return res.json({
+          reply: `📝 *Contoh Format Kas/Stok/HPP:*\n\n• Kas masuk: "kas masuk 500000 panen padi"\n• Kas keluar: "kas keluar 150000 beli urea"\n• Stok: "stok urea keluar 50 kg kios tani makmur"\n• HPP: "hitung hpp padi 2 hektar"\n• Saldo: "lihat saldo kas" / "cek sisa stok urea"`,
+          quickReplies: ["Catat Kas", "Catat Stok", "Hitung HPP"],
+          isComplete: true,
+          aiProvider: "rule_based",
+        });
+      }
+      const erpWriteWords = /catat|masuk|keluar|tambah|input|simpan|hitung|keluarkan|masukkan/;
+      const erpReadCash = /saldo/.test(erpLower) && !erpWriteWords.test(erpLower);
+      const erpReadStock = /sisa stok|cek stok|stok tersedia|stok saat ini/.test(erpLower) && !erpWriteWords.test(erpLower);
+      if (erpReadCash || erpReadStock) {
+        const erpScope = resolveErpScope(effPhone);
+        if (erpReadCash) {
+          const rows = erpScope.isAdmin || !erpScope.farmerId ? cashDb : cashDb.filter((c) => c.farmerId === erpScope.farmerId);
+          const s = cashSaldo(rows);
+          return res.json({
+            reply: `💰 *Saldo Kas${erpScope.isAdmin ? " (Semua Petani)" : ""}: Rp ${s.saldo.toLocaleString("id-ID")}*\n• Masuk: Rp ${s.masuk.toLocaleString("id-ID")}\n• Keluar: Rp ${s.keluar.toLocaleString("id-ID")}`,
+            quickReplies: ["Catat Kas", "Cek Sisa Stok", "Hitung HPP"],
+            isComplete: true,
+            aiProvider: "rule_based",
+          });
+        }
+        if (erpScope.isAdmin) {
+          const linesAdmin: string[] = [];
+          for (const sp of suppliersDb.slice(0, 8)) {
+            for (const it of stockSaldo(sp.id).filter((x) => x.saldo !== 0).slice(0, 3)) {
+              linesAdmin.push(`• ${it.produk}: ${it.saldo} ${it.satuan} (${sp.nama})`);
+              if (linesAdmin.length >= 8) break;
+            }
+            if (linesAdmin.length >= 8) break;
+          }
+          return res.json({
+            reply: linesAdmin.length > 0 ? `📦 *Sisa Stok Kios:*\n${linesAdmin.join("\n")}` : `📦 Belum ada stok tercatat di kios mana pun.`,
+            quickReplies: ["Catat Stok", "Lihat Saldo Kas"],
+            isComplete: true,
+            aiProvider: "rule_based",
+          });
+        }
+        if (!erpScope.supplierId) {
+          return res.json({
+            reply: `📦 Stok tercatat per kios/supplier. Nomor ini belum terhubung ke data kios — hubungi admin atau sebutkan nama kiosnya.`,
+            quickReplies: ["Catat Stok", "🏢 Tambah Supplier"],
+            isComplete: true,
+            aiProvider: "rule_based",
+          });
+        }
+        const items = stockSaldo(erpScope.supplierId).filter((x) => x.saldo !== 0);
+        return res.json({
+          reply: items.length > 0 ? `📦 *Sisa Stok:*\n${items.map((it) => `• ${it.produk}: ${it.saldo} ${it.satuan}`).join("\n")}` : `📦 Belum ada stok tercatat untuk kios Anda.`,
+          quickReplies: ["Catat Stok", "Lihat Saldo Kas"],
+          isComplete: true,
+          aiProvider: "rule_based",
+        });
+      }
       // Lazy-benar: regex dulu (0ms); sidecar hanya saat regex miss.
       let erpIntent = detectErpIntent(erpLower, null);
       let layaErp: { intent: string; confidence: number } | null | undefined = null;
@@ -4859,6 +4964,14 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       lowerMsg.includes("simpan") ||
       lowerMsg.includes("kios") ||
       lowerMsg.includes("supplier");
+
+    if (/^\s*batal/i.test(message || "") && ((currentSupplierDraft && Object.keys(currentSupplierDraft).length > 0) || isSupplierMsg)) {
+      return res.json({
+        reply: "Baik, draf pendaftaran supplier dibatalkan. Ketik *tambah supplier* kapan pun untuk memulai lagi.",
+        quickReplies: ["🏢 Tambah Supplier", "📊 Rekap Semua Petani"],
+        extractedSupplier: {}, isComplete: true, isAdminAction: isAdmin, clearSupplierDraft: true, aiProvider: "rule_based",
+      } as any);
+    }
 
     if (isSupplierMsg || (hasSupplierDraft && isAddAction)) {
       const reg = extractSupplierFromText(message, currentSupplierDraft || {});
@@ -5067,6 +5180,18 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           quickReplies: ["🌶️ Detail Petani Cabai", "🧅 Detail Petani Bawang", "📊 Rekap Semua Petani", "📥 Ekspor Sheets"],
         });
       }
+      if (isAdmin && /verifikasi semua/i.test(message || "")) {
+        const pending = farmersDb.filter((f) => f.statusVerifikasi !== "Terverifikasi");
+        for (const f of pending) f.statusVerifikasi = "Terverifikasi";
+        if (pending.length > 0) saveFarmersToDisk();
+        return res.json({
+          reply: pending.length === 0
+            ? `🟢 Semua ${farmersDb.length} petani sudah terverifikasi.`
+            : `✅ *${pending.length} petani berhasil diverifikasi:*\n${pending.map((f) => `• ${f.nama} (${f.id})`).join("\n")}`,
+          quickReplies: ["📊 Rekap Semua Petani", "⚠️ Cek Belum Verifikasi"],
+          extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based",
+        });
+      }
       const leanContext = buildLeanTargetedContext(message, true);
 
       const adminSystemInstructions = `Anda adalah "Kang Tani AI - Executive Agricultural Intelligence Assistant", asisten AI resmi untuk dinas pertanian dan petugas PPL.
@@ -5207,6 +5332,21 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     }
 
     // GENERAL CONVERSATION (Petani Biasa / Non-Admin) with Lean Targeted Context
+    if (/status lahan( saya|ku)?\b/i.test(message || "") && !/daftar|tambah|input|catat|simpan/.test((message || "").toLowerCase())) {
+      const me = resolveChatFarmer(effPhone, message);
+      if (!me) {
+        return res.json({
+          reply: `Nomor ini belum terdaftar sebagai petani. Ketik *daftar* untuk mendaftarkan lahan Anda.`,
+          quickReplies: ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini"],
+          extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based",
+        });
+      }
+      return res.json({
+        reply: `🌾 *Status Lahan ${me.nama}* (${me.id}):\n• Komoditas: ${me.komoditas}\n• Luas: ${me.luasLahanFormatted}\n• Lokasi: ${me.kabupaten || me.alamat}\n• Verifikasi: ${me.statusVerifikasi}`,
+        quickReplies: ["Cek Harga Pasar Hari Ini", "Konsultasi Hama Tanaman"],
+        extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based",
+      });
+    }
     const leanContext = buildLeanTargetedContext(message, false);
     const layaDetected = ai ? await chatLaya() : null; // rule path (ai null) tak butuh fetch ~1 dtk
 

@@ -255,6 +255,15 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
             }),
           });
           const result = await res.json();
+          if (result.isFallback) {
+            setMessages((prev) => [...prev, {
+              id: `bot-voice-${Date.now()}`,
+              sender: 'bot',
+              text: '⚠️ ' + (result.error || 'Transkripsi suara belum tersedia. Coba lagi nanti.'),
+              timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+            }]);
+            return;
+          }
           const transcript = result.transcription || 'Pesan suara berhasil direkam.';
 
           if (result.extracted) {
