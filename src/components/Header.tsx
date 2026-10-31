@@ -88,7 +88,7 @@ export const Header: React.FC<HeaderProps> = ({
           <Sprout className="w-5 h-5 text-white" />
         </div>
         <div className="min-w-0">
-          <p className="font-bold text-slate-900 leading-tight">Hai Tani</p>
+          <p className="font-display font-bold text-slate-900 leading-tight">Hai Tani</p>
           <p className="text-xs text-slate-500 leading-tight">Konsol Admin</p>
         </div>
       </div>

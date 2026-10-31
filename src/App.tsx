@@ -7,6 +7,7 @@ import { WhatsAppChatbot } from './components/WhatsAppChatbot';
 import { GoogleSheetsView } from './components/GoogleSheetsView';
 import { MarketAnomalyView } from './components/MarketAnomalyView';
 import { MarketPriceTable } from './components/MarketPriceTable';
+import { FruitPriceManager } from './components/FruitPriceManager';
 import { DataScientistPortal } from './components/DataScientistPortal';
 import { FarmerSupplierMapView } from './components/FarmerSupplierMapView';
 import { WebhookModal } from './components/WebhookModal';
@@ -513,6 +514,7 @@ function AdminApp() {
         )}
 
         {activeTab === 'market' && (
+          <>
           <MarketAnomalyView
             commodities={commodities}
             notifications={notifications}
@@ -520,6 +522,8 @@ function AdminApp() {
             onUpdateCommodityPrice={handleUpdateCommodityPrice}
             onBroadcastNotification={handleBroadcastNotification}
           />
+          <FruitPriceManager />
+          </>
         )}
 
         {activeTab === 'datascientist' && (

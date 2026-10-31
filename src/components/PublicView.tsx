@@ -525,22 +525,7 @@ export const PublicView: React.FC = () => {
             {hargaTab === 'sayur' ? (
               <MarketPriceTable sumber="mantung" badge="Pasar Mantung" title="Harga Sayur Terkini" />
             ) : (
-              <div className="border border-slate-200 rounded-lg p-10 text-center">
-                <Apple className="w-8 h-8 text-slate-300 mx-auto" />
-                <p className="mt-3 text-base font-bold text-slate-900">Harga buah segera hadir</p>
-                <p className="mt-1 text-sm text-slate-500 max-w-md mx-auto">
-                  Sumber data buah masih disiapkan. Harga sayur di tab sebelah sudah live,
-                  atau tanya harga lewat chat.
-                </p>
-                <a
-                  href={WA_CHAT_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-4 inline-block text-sm font-semibold text-emerald-700 hover:text-emerald-800"
-                >
-                  Chat Kang Tani
-                </a>
-              </div>
+              <MarketPriceTable sumber="buah" badge="InfoPangan" title="Harga Buah Terkini" />
             )}
           </div>
         </section>

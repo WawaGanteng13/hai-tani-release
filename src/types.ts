@@ -272,6 +272,16 @@ export interface AffiliateSale {
   waktuCatat: string;
 }
 
+// Harga buah input admin (digabung sumber live InfoPangan).
+export interface FruitPrice {
+  id: string;
+  nama: string;
+  satuan: string;
+  harga: number;
+  pasar?: string;
+  waktuCatat: string;
+}
+
 export type CashJenis = 'MASUK' | 'KELUAR';
 export type CashKategoriMasuk = 'Penjualan Panen' | 'Subsidi/Bantuan' | 'Pinjaman' | 'Lainnya';
 export type CashKategoriKeluar =

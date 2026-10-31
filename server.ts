@@ -33,6 +33,7 @@ import {
   Offer,
   OfferLine,
   OfferStatus,
+  FruitPrice,
   FeedbackRecord,
   FeedbackKategori,
   DocumentRecord,
@@ -529,6 +530,8 @@ const OFFERS_FILE = path.join(DATA_DIR, "offers_db.json");
 const FEEDBACK_FILE = path.join(DATA_DIR, "feedback_db.json");
 const FEEDBACK_CSV = path.join(DATA_DIR, "feedback_db.csv");
 const DOCUMENTS_FILE = path.join(DATA_DIR, "documents_db.json");
+const FRUIT_FILE = path.join(DATA_DIR, "fruit_db.json");
+let fruitPricesDb: FruitPrice[] = [];
 const PRODUCTS_FILE = path.join(DATA_DIR, "products_db.json");
 const AFFILIATE_FILE = path.join(DATA_DIR, "affiliate_db.json");
 
@@ -637,6 +640,11 @@ function initPersistence() {
     if (Array.isArray(prdData) && prdData.length > 0) {
       productsDb = prdData as ProductRecord[];
       console.log(`[Storage] Berhasil memuat ${productsDb.length} produk afiliasi dari disk (${PRODUCTS_FILE})`);
+    }
+    const buhData = readJsonSafe<unknown>(FRUIT_FILE, [], "fruit_db.json");
+    if (Array.isArray(buhData) && buhData.length > 0) {
+      fruitPricesDb = buhData as FruitPrice[];
+      console.log(`[Storage] Berhasil memuat ${fruitPricesDb.length} harga buah admin dari disk (${FRUIT_FILE})`);
     }
     const affData = readJsonSafe<unknown>(AFFILIATE_FILE, [], "affiliate_db.json");
     if (Array.isArray(affData) && affData.length > 0) {
@@ -976,6 +984,50 @@ function saveProductsToDisk() {
 
 function saveAffiliateToDisk() {
   writeJsonAtomic(AFFILIATE_FILE, affiliateDb, "affiliate_db.json");
+}
+
+function saveFruitToDisk() {
+  writeJsonAtomic(FRUIT_FILE, fruitPricesDb, "fruit_db.json");
+}
+
+function nextFruitId(): string {
+  let n = 0;
+  for (const r of fruitPricesDb) {
+    const m = /^BUH-(\d+)$/.exec(r.id || "");
+    if (m) n = Math.max(n, Number(m[1]));
+  }
+  return `BUH-${String(n + 1).padStart(3, "0")}`;
+}
+
+// Harga buah: live InfoPangan DKI Jakarta (API publik, cache 30 mnt) digabung
+// baris input admin. Buah live = Semangka + Jeruk Medan (commodity 24/25).
+const BUAH_LIVE_IDS = new Set([24, 25]);
+let buahCache: { at: number; tanggal: string; daftar: Array<{ nama: string; satuan: string; harga: number; asal: string }> } | null = null;
+async function fetchHargaBuah(): Promise<{ tanggal: string; live: boolean; daftar: Array<{ nama: string; satuan: string; harga: number; asal: string }> }> {
+  const admin = fruitPricesDb.map((r) => ({ nama: r.nama, satuan: r.satuan, harga: r.harga, asal: "admin" }));
+  const now = Date.now();
+  if (buahCache && now - buahCache.at < 30 * 60 * 1000) {
+    return { tanggal: buahCache.tanggal, live: true, daftar: [...buahCache.daftar, ...admin] };
+  }
+  try {
+    const res = await fetch("https://infopangan.jakarta.go.id/api2/v1/public/master-data/commodities", {
+      signal: AbortSignal.timeout(20000),
+      headers: { "user-agent": "HaiTani/1.0", accept: "application/json" },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j: any = await res.json();
+    const rows: any[] = Array.isArray(j?.data?.data) ? j.data.data : [];
+    const live = rows
+      .filter((x) => BUAH_LIVE_IDS.has(Number(x?.commodity_id)) && /semangka|jeruk/i.test(String(x?.name || "")))
+      .map((x) => ({ nama: String(x.name), satuan: String(x.unit || "kg"), harga: Number(x.newest_price) || 0, asal: "live" }))
+      .filter((x) => x.harga > 0);
+    const tanggal = String(j?.data?.selected_price_date || new Date().toISOString().slice(0, 10));
+    buahCache = { at: now, tanggal, daftar: live };
+    return { tanggal, live: true, daftar: [...live, ...admin] };
+  } catch (_e) {
+    if (buahCache) return { tanggal: buahCache.tanggal, live: false, daftar: [...buahCache.daftar, ...admin] };
+    return { tanggal: new Date().toISOString().slice(0, 10), live: false, daftar: admin };
+  }
 }
 
 // F4: cari produk mitra aktif yang cocok dengan teks (nama/kata kunci).
@@ -6040,6 +6092,17 @@ export function createServerApp() {
   app.get("/api/harga-pasar", async (req, res) => {
     try {
       const sumber = String((req.query as any)?.sumber || "siska").toLowerCase();
+      if (sumber === "buah") {
+        const b = await fetchHargaBuah();
+        res.json({
+          sumber: "InfoPangan DKI Jakarta + Input Admin",
+          tanggal: b.tanggal,
+          live: b.live,
+          count: b.daftar.length,
+          daftar: b.daftar,
+        });
+        return;
+      }
       if (sumber === "mantung" || sumber === "semua") {
         const mt = await fetchHargaMantung();
         if (sumber === "mantung") {
@@ -6071,6 +6134,48 @@ export function createServerApp() {
     } catch (e: any) {
       res.status(502).json({ error: "Gagal mengambil harga pasar", detail: String(e?.message || e) });
     }
+  });
+
+  // Harga buah input admin (digabung sumber live di ?sumber=buah).
+  app.get("/api/fruit-prices", requireSession(), (_req, res) => {
+    res.json(fruitPricesDb);
+  });
+  app.post("/api/fruit-prices", requireSession(), (req, res) => {
+    const gate = requireRequesterAdmin(req.body);
+    if (!gate.ok) {
+      return res.status(403).json({ error: gate.error });
+    }
+    const nama = String(req.body?.nama || "").trim().slice(0, 60);
+    const satuan = String(req.body?.satuan || "").trim().slice(0, 12) || "kg";
+    const harga = Number(req.body?.harga) || 0;
+    const pasar = String(req.body?.pasar || "").trim().slice(0, 60);
+    if (!nama || harga <= 0) {
+      return res.status(400).json({ error: "nama + harga (>0) wajib." });
+    }
+    const dupe = fruitPricesDb.some((r) => r.nama.toLowerCase() === nama.toLowerCase());
+    if (dupe) {
+      return res.status(409).json({ error: "Buah ini sudah ada. Hapus dulu untuk ganti harga." });
+    }
+    const rec: FruitPrice = { id: nextFruitId(), nama, satuan, harga, pasar: pasar || undefined, waktuCatat: new Date().toISOString() };
+    fruitPricesDb.unshift(rec);
+    saveFruitToDisk();
+    bumpDataVersion();
+    res.json(rec);
+  });
+  app.delete("/api/fruit-prices/:id", requireSession(), (req, res) => {
+    const gate = requireRequesterAdmin(req.body);
+    if (!gate.ok) {
+      return res.status(403).json({ error: gate.error });
+    }
+    const id = String(req.params.id || "").toUpperCase();
+    const ix = fruitPricesDb.findIndex((r) => r.id.toUpperCase() === id);
+    if (ix < 0) {
+      return res.status(404).json({ error: "Baris buah tidak ditemukan." });
+    }
+    const [gone] = fruitPricesDb.splice(ix, 1);
+    saveFruitToDisk();
+    bumpDataVersion();
+    res.json({ deleted: gone.id });
   });
 
   // POST simulate or update commodity price
