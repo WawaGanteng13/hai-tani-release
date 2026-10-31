@@ -385,7 +385,7 @@ export function generateArchitecturePdf() {
       [
         'Petani Mandiri &\nKelompok Tani (Poktan)',
         '• Konsultasi agronomi & rekomendasi penanganan hama 24 jam.\n• Pendaftaran lahan tanpa aplikasi baru (cukup via WhatsApp).\n• Cek transparansi harga pasar komoditas harian.\n• Panduan takaran pupuk dan waktu panen optimal.',
-        '• Menghemat waktu konsultasi hingga 90%.\n• Menghindari tengkulak dengan referensi harga pasar terbuka.\n• Mendapatkan akses prioritas program subsidi pupuk pemerintah.',
+        '• Menghemat waktu konsultasi hingga 90%.\n• Mendapat harga terbaik dari buyer dengan referensi harga pasar terbuka.\n• Mendapatkan akses prioritas program subsidi pupuk pemerintah.',
       ],
       [
         'Petugas Penyuluh Lapangan\n(PPL Pertanian)',

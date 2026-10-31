@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+﻿import React, { useState, useRef, useEffect } from 'react';
 import {
   Send,
   CheckCheck,
@@ -1924,7 +1924,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
                           <option value="Pupuk & Saprodi">Pupuk & Saprodi</option>
                           <option value="Bibit & Benih">Bibit & Benih</option>
                           <option value="Alat & Mesin Pertanian">Alat & Mesin Pertanian</option>
-                          <option value="Offtaker & Pengepul">Offtaker & Pengepul</option>
+                          <option value="Buyer & Offtaker">Buyer & Offtaker</option>
                           <option value="Koperasi Tani">Koperasi Tani</option>
                         </select>
                       </div>

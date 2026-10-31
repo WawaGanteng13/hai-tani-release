@@ -23,7 +23,7 @@ export interface FarmerRecord {
 export interface SupplierRecord {
   id: string;
   nama: string;
-  kategori: 'Pupuk & Saprodi' | 'Bibit & Benih' | 'Alat & Mesin Pertanian (Alsintan)' | 'Offtaker & Pengepul' | 'Koperasi Tani';
+  kategori: 'Pupuk & Saprodi' | 'Bibit & Benih' | 'Alat & Mesin Pertanian (Alsintan)' | 'Buyer & Offtaker' | 'Koperasi Tani';
   kontak: string;
   alamat: string;
   kabupaten: string;
@@ -108,11 +108,140 @@ export interface AdminUser {
   nama: string;
   noHp: string;
   instansi: string;
-  role: 'ADMIN_UTAMA' | 'PETUGAS_PPL' | 'DATA_SCIENTIST';
+  role: 'SUPER_ADMIN' | 'ADMIN_UTAMA' | 'PETUGAS_PPL' | 'DATA_SCIENTIST';
   izinAkses: string[];
   aktif: boolean;
   waktuTerdaftar: string;
   didaftarkanOleh?: string;
+  appointedBy?: string;
+}
+
+export type UserRole = 'PETANI' | 'BUYER' | 'SUPPLIER';
+export type OnboardingState = 'NEW' | 'TOS_SENT' | 'ROLE_ASK' | 'LOC_ASK' | 'DONE' | 'DONE_WEAK' | 'DECLINED';
+export type UserTier = 'FREE' | 'PAID';
+export type UserStatus = 'ACTIVE' | 'DECLINED' | 'FLAGGED' | 'BLOCKED';
+
+// F1: identitas + onboarding + anti-spam per nomor WA (users_db.json).
+// Field tier = telemetri pasif (rencana; tanpa enforcement sampai F9).
+export interface UserRecord {
+  phone: string;
+  role?: UserRole;
+  onboardingState: OnboardingState;
+  onboardingTries?: number;
+  tosVersion?: string;
+  tosAt?: string;
+  locLat?: number;
+  locLng?: number;
+  locLabel?: string;
+  locMapsUrl?: string;
+  locAt?: string;
+  locWeak?: boolean;
+  tier: UserTier;
+  paidAt?: string;
+  paidRef?: string;
+  dailyChats?: number;
+  lastChatDate?: string;
+  status: UserStatus;
+  declineNoticed?: boolean;
+  spamScore?: number;
+  spamCooldownUntil?: number;
+  blockedAt?: string;
+  blockReason?: string;
+  blockNoticed?: boolean;
+  keywordHist?: Array<{ kw: string; ts: string }>;
+  feedbackCount?: number;
+  // F3: pertanyaan negosiasi yang menunggu jawaban user ini.
+  // F6: kind 'NUDGE' = pertanyaan proaktif harga (nudge harian).
+  pendingAsk?: { kind: 'HARGA_JUAL' | 'BUDGET' | 'KONFIRM_DEAL' | 'NUDGE'; offerId: string; ts: string; nudge?: { komoditasId: string; field: 'harga' } };
+  // F6 session-maximizer: 1x sodoran/hari + opt-out permanen.
+  lastNudgeAt?: string;
+  nudgeOptOut?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type KomoditasStatus = 'AKTIF' | 'PANEN' | 'SELESAI';
+
+// F2: multi-komoditas append-only per petani (komoditas_db.json, KMD-xxx).
+// PANEN = siap panen/jual (dipakai F3 negotiator); SELESAI = musim berakhir.
+export interface FarmerCommodity {
+  id: string;
+  farmerId: string;
+  komoditas: string;
+  varietas?: string;
+  luasHa?: number;
+  estimasiPanen?: string;
+  estimasiHasilTon?: number;
+  musimTanam?: string;
+  status: KomoditasStatus;
+  createdAt: string;
+  updatedAt: string;
+  googleSheetRow?: number;
+  // F3: stok panen siap jual — HANYA dari ucapan petani, tak pernah dikarang.
+  stokSiapJualTon?: number;
+  stokUpdatedAt?: string;
+  hargaMintaPerKg?: number;
+  hargaMintaAt?: string;
+}
+
+// F3: negosiator buyer-petani (offers_db.json, OFR-xxx). Harga jual ditanya
+// dulu ke petani; cocok bila <= budget buyer; selisih masuk kas Hai Tani.
+export type OfferStatus = 'OPEN' | 'COCOK' | 'SEBAGIAN' | 'DEAL' | 'BATAL';
+export interface OfferLine {
+  farmerId: string;
+  komoditasId: string;
+  stokKg: number;
+  hargaPetaniPerKg?: number;
+  hargaAt?: string;
+  alokasiKg?: number;
+  cocok?: boolean;
+}
+export interface Offer {
+  id: string;
+  buyerPhone: string;
+  komoditas: string;
+  qtyKg: number;
+  budgetPerKg?: number;
+  budgetAt?: string;
+  status: OfferStatus;
+  lines: OfferLine[];
+  spreadTotalRp?: number;
+  kasId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// F7: log Saran & Masukan (feedback_db.json, FDB-xxx) + cermin tab Sheets.
+export type FeedbackKategori = 'SARAN' | 'KOMPLAIN' | 'TIDAK_TAHU';
+export interface FeedbackRecord {
+  id: string;
+  tanggal: string;
+  phone: string;
+  nama?: string;
+  kategori: FeedbackKategori;
+  pesan: string;
+  konteks?: string;
+  status: 'BARU' | 'DIBACA';
+  waktuCatat: string;
+  googleSheetRow?: number;
+}
+
+// F8: dokumen WA (nota/katalog/laporan) yang diparsing + entitasnya.
+export type DocumentTipe = 'pdf' | 'docx' | 'xlsx' | 'csv' | 'txt' | 'lainnya';
+export interface DocumentRecord {
+  id: string;
+  tanggal: string;
+  phone: string;
+  nama?: string;
+  namaFile: string;
+  tipe: string;
+  ukuranByte: number;
+  komoditas: string[];
+  harga: string[];
+  saprodi: string[];
+  ringkasan: string;
+  mediaPath?: string;
+  waktuCatat: string;
 }
 
 export type CashJenis = 'MASUK' | 'KELUAR';

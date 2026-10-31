@@ -1,4 +1,4 @@
-import { FarmerRecord, MarketCommodity, AnomalyNotification, StrategicRecommendation, SupplierRecord } from '../types';
+﻿import { FarmerRecord, MarketCommodity, AnomalyNotification, StrategicRecommendation, SupplierRecord } from '../types';
 
 export const INITIAL_SUPPLIERS: SupplierRecord[] = [
   {
@@ -71,8 +71,8 @@ export const INITIAL_SUPPLIERS: SupplierRecord[] = [
   },
   {
     id: 'SUP-005',
-    nama: 'CV Agro Sumber Pangan (Offtaker & Pengepul Cabai Malang)',
-    kategori: 'Offtaker & Pengepul',
+    nama: 'CV Agro Sumber Pangan (Buyer Cabai Malang)',
+    kategori: 'Buyer & Offtaker',
     kontak: '+62 822-4455-6633',
     alamat: 'Jl. Raya Pujon No. 88, Kec. Pujon',
     kabupaten: 'Malang, Jawa Timur',
@@ -123,7 +123,7 @@ export const INITIAL_SUPPLIERS: SupplierRecord[] = [
   {
     id: 'SUP-008',
     nama: 'Sentra Penggilingan Beras Organik & Offtaker Cianjur Berkah',
-    kategori: 'Offtaker & Pengepul',
+    kategori: 'Buyer & Offtaker',
     kontak: '+62 877-3344-9900',
     alamat: 'Jl. Raya Sukabumi - Cianjur KM 5, Nagrak',
     kabupaten: 'Cianjur, Jawa Barat',
@@ -157,7 +157,7 @@ export const INITIAL_SUPPLIERS: SupplierRecord[] = [
   {
     id: 'SUP-010',
     nama: 'Pengepul & Distribusi Jagung Hibrida Blitar Sejahtera',
-    kategori: 'Offtaker & Pengepul',
+    kategori: 'Buyer & Offtaker',
     kontak: '+62 822-7788-9966',
     alamat: 'Jl. Raya Beru No. 15, Kec. Wlingi',
     kabupaten: 'Blitar, Jawa Timur',
@@ -491,7 +491,7 @@ export const INITIAL_COMMODITIES: MarketCommodity[] = [
     daerahSampel: 'Pasar Cibitung & Pasar Caringin',
     tanggalUpdate: '15 Sep 2026',
     pesanAnomali: 'Kenaikan signifikan (+17.4%) dipicu oleh tingginya serapan industri bumbu dan hotel/restoran.',
-    rekomendasiPetani: 'Pertahankan kontinuitas petik dan koordinasikan dengan kelompok tani untuk distribusi langsung memotong rantai tengkulak.',
+    rekomendasiPetani: 'Pertahankan kontinuitas petik dan koordinasikan dengan kelompok tani untuk distribusi langsung memotong rantai perantara.',
     tren7Hari: [
       { tanggal: '09 Sep', harga: 42000 },
       { tanggal: '10 Sep', harga: 43500 },
@@ -509,7 +509,7 @@ export const INITIAL_NOTIFICATIONS: AnomalyNotification[] = [
     id: 'notif-1',
     komoditas: 'Cabai Rawit Merah',
     tipeAnomali: 'LONJAKAN_EKSTREM',
-    pesanPeringatan: '⚠️ [TaniAI ALERT HARGA]: Selamat siang Bpk/Ibu petani cabai. Terjadi lonjakan harga pasar Cabai Rawit Merah hari ini sebesar +35.3% (mencapai Rp 78.500/kg). Disarankan untuk mempercepat petik merah bertahap dan berhati-hati terhadap tengkulak keliling.',
+    pesanPeringatan: '⚠️ [TaniAI ALERT HARGA]: Selamat siang Bpk/Ibu petani cabai. Terjadi lonjakan harga pasar Cabai Rawit Merah hari ini sebesar +35.3% (mencapai Rp 78.500/kg). Disarankan untuk mempercepat petik merah bertahap dan berhati-hati terhadap tawaran harga di bawah pasar.',
     waktuKirim: '15 Sep 2026, 14:00 WIB',
     jumlahPetaniTerdampak: 4,
     status: 'Terkirim',

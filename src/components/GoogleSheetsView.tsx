@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import {
   Table,
   Search,
@@ -561,7 +561,7 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
                 <option value="Pupuk & Saprodi">Pupuk & Saprodi</option>
                 <option value="Bibit & Benih">Bibit & Benih</option>
                 <option value="Alat & Mesin Pertanian (Alsintan)">Alsintan</option>
-                <option value="Offtaker & Pengepul">Offtaker & Pengepul</option>
+                <option value="Buyer & Offtaker">Buyer & Offtaker</option>
                 <option value="Koperasi Tani">Koperasi Tani</option>
               </select>
             )}
@@ -727,7 +727,7 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
                               ? 'bg-amber-50 text-amber-800 border-amber-200'
                               : s.kategori === 'Alat & Mesin Pertanian (Alsintan)'
                               ? 'bg-blue-50 text-blue-800 border-blue-200'
-                              : s.kategori === 'Offtaker & Pengepul'
+                              : s.kategori === 'Buyer & Offtaker'
                               ? 'bg-purple-50 text-purple-800 border-purple-200'
                               : 'bg-teal-50 text-teal-800 border-teal-200'
                           }`}

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+﻿import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   APIProvider,
   Map,
@@ -317,7 +317,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
         return { icon: '🌱', color: '#16a34a', bg: 'bg-green-600', badge: 'bg-green-100 text-green-800' };
       case 'Alat & Mesin Pertanian (Alsintan)':
         return { icon: '🚜', color: '#ea580c', bg: 'bg-orange-600', badge: 'bg-orange-100 text-orange-800' };
-      case 'Offtaker & Pengepul':
+      case 'Buyer & Offtaker':
         return { icon: '🏢', color: '#7c3aed', bg: 'bg-purple-600', badge: 'bg-purple-100 text-purple-800' };
       case 'Koperasi Tani':
         return { icon: '🤝', color: '#0d9488', bg: 'bg-teal-600', badge: 'bg-teal-100 text-teal-800' };
@@ -428,7 +428,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
               <option value="Pupuk & Saprodi">📦 Pupuk & Saprodi</option>
               <option value="Bibit & Benih">🌱 Bibit & Benih</option>
               <option value="Alat & Mesin Pertanian (Alsintan)">🚜 Alsintan & Pompanisasi</option>
-              <option value="Offtaker & Pengepul">🏢 Offtaker & Pengepul</option>
+              <option value="Buyer & Offtaker">🏢 Buyer & Offtaker</option>
               <option value="Koperasi Tani">🤝 Koperasi Tani</option>
             </select>
 
@@ -1162,7 +1162,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
                     <option value="Pupuk & Saprodi">📦 Pupuk & Saprodi Resmi BUMN</option>
                     <option value="Bibit & Benih">🌱 Bibit & Benih Unggul Bersertifikat</option>
                     <option value="Alat & Mesin Pertanian (Alsintan)">🚜 Alat & Mesin Pertanian (Alsintan)</option>
-                    <option value="Offtaker & Pengepul">🏢 Offtaker & Pengepul Hasil Panen</option>
+                    <option value="Buyer & Offtaker">🏢 Buyer & Offtaker Hasil Panen</option>
                     <option value="Koperasi Tani">🤝 Koperasi Tani Terpadu</option>
                   </select>
                 </div>

@@ -389,7 +389,7 @@ export const TechnicalWhitepaperModal: React.FC<TechnicalWhitepaperModalProps> =
                   <ul className="text-xs text-slate-700 space-y-1.5 list-disc list-inside">
                     <li><strong>Konsultasi Hama 24/7:</strong> Menanyakan gejala serangan wereng, patek, atau ulat dan memperoleh rekomendasi takaran pestisida alami.</li>
                     <li><strong>Pendaftaran Lahan Cepat:</strong> Cukup mengetik pesan singkat atau kirim voice note tanpa perlu form registrasi berbelit.</li>
-                    <li><strong>Transparansi Harga Pasar:</strong> Mengetahui harga acuan gabah, cabai, dan bawang di pasar induk agar terhindar dari tengkulak.</li>
+                    <li><strong>Transparansi Harga Pasar:</strong> Mengetahui harga acuan gabah, cabai, dan bawang di pasar induk agar mendapat harga terbaik dari buyer.</li>
                     <li><strong>Akses Subsidi Tepat Sasaran:</strong> Terdaftar secara resmi di database binaan dinas untuk prioritas pupuk bersubsidi.</li>
                   </ul>
                 </div>

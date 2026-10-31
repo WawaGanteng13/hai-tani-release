@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import { X, Building2, MapPin, Phone, Package, Tag, ShieldCheck, CheckCircle2 } from 'lucide-react';
 import { SupplierRecord } from '../types';
 
@@ -142,7 +142,7 @@ export const AddSupplierModal: React.FC<AddSupplierModalProps> = ({ isOpen, onCl
                 <option value="Pupuk & Saprodi">🌾 Pupuk & Saprodi Pertanian</option>
                 <option value="Bibit & Benih">🌱 Bibit & Benih Unggul</option>
                 <option value="Alat & Mesin Pertanian (Alsintan)">🚜 Alat & Mesin (Alsintan)</option>
-                <option value="Offtaker & Pengepul">🏢 Offtaker & Pengepul Hasil Panen</option>
+                <option value="Buyer & Offtaker">🏢 Buyer & Offtaker Hasil Panen</option>
                 <option value="Koperasi Tani">🤝 Koperasi Tani Mandiri</option>
               </select>
             </div>

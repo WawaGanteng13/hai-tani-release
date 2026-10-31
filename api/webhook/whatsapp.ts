@@ -43,9 +43,36 @@ function pickIncoming(value: any): { from: string; text: string } | null {
     return null;
   }
 }
-// Media WA (voice note = audio, foto = image). Stiker/dokumen/video diabaikan
-// (pipe mentah tetap jalan; tanpa balasan otomatis).
-function pickMedia(value: any): { from: string; kind: "voice" | "image"; mediaId: string; mime: string; waId: string; caption: string } | null {
+// Media WA (voice note = audio, foto = image, berkas = document). Stiker/video
+// diabaikan (pipe mentah tetap jalan; tanpa balasan otomatis).
+// ShareLoc WA (Meta): msg.type === "location" -> msg.location.{latitude,
+// longitude, name, address}. Dipilih terpisah (pickLocation) agar koordinat
+// riil tersimpan, bukan ditebak dari nama kabupaten.
+function pickLocation(value: any): { from: string; latitude: number; longitude: number; name: string; address: string; waId: string } | null {
+  try {
+    const msg = value?.messages?.[0];
+    if (!msg || msg.type !== "location" || !msg.location) return null;
+    const from = String(msg.from || "");
+    const businessNumber = String(value?.metadata?.display_phone_number || "");
+    if (!from || (businessNumber && from === businessNumber)) return null; // anti-loop
+    const latitude = Number(msg.location.latitude);
+    const longitude = Number(msg.location.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+    if (latitude === 0 && longitude === 0) return null;
+    return {
+      from,
+      latitude,
+      longitude,
+      name: String(msg.location.name || "").slice(0, 200),
+      address: String(msg.location.address || "").slice(0, 500),
+      waId: String(msg.id || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+function pickMedia(value: any): { from: string; kind: "voice" | "image" | "document"; mediaId: string; mime: string; waId: string; caption: string; filename: string } | null {
   try {
     const msg = value?.messages?.[0];
     if (!msg) return null;
@@ -53,17 +80,20 @@ function pickMedia(value: any): { from: string; kind: "voice" | "image"; mediaId
     const businessNumber = String(value?.metadata?.display_phone_number || "");
     if (!from || (businessNumber && from === businessNumber)) return null; // anti-loop
     if (msg.type === "audio" && msg.audio?.id) {
-      return { from, kind: "voice", mediaId: String(msg.audio.id), mime: String(msg.audio.mime_type || "audio/ogg"), waId: String(msg.id || ""), caption: "" };
+      return { from, kind: "voice", mediaId: String(msg.audio.id), mime: String(msg.audio.mime_type || "audio/ogg"), waId: String(msg.id || ""), caption: "", filename: "" };
     }
     if (msg.type === "image" && msg.image?.id) {
-      return { from, kind: "image", mediaId: String(msg.image.id), mime: String(msg.image.mime_type || "image/jpeg"), waId: String(msg.id || ""), caption: String(msg.image.caption || "").slice(0, 500) };
+      return { from, kind: "image", mediaId: String(msg.image.id), mime: String(msg.image.mime_type || "image/jpeg"), waId: String(msg.id || ""), caption: String(msg.image.caption || "").slice(0, 500), filename: "" };
+    }
+    if (msg.type === "document" && msg.document?.id) {
+      return { from, kind: "document", mediaId: String(msg.document.id), mime: String(msg.document.mime_type || "application/octet-stream"), waId: String(msg.id || ""), caption: String(msg.document.caption || "").slice(0, 500), filename: String(msg.document.filename || "dokumen").slice(0, 200) };
     }
     return null;
   } catch {
     return null;
   }
 }
-async function downloadWaMedia(mediaId: string): Promise<{ buf: Buffer; mime: string } | null> {
+async function downloadWaMedia(mediaId: string, maxBytes = 3 * 1024 * 1024): Promise<{ buf: Buffer; mime: string } | null> {
   const token = (process.env.WHATSAPP_TOKEN || "").trim();
   if (!token || !mediaId) return null;
   const ctl = new AbortController();
@@ -83,7 +113,7 @@ async function downloadWaMedia(mediaId: string): Promise<{ buf: Buffer; mime: st
     });
     if (!dl.ok) return null;
     const ab = await dl.arrayBuffer();
-    if (!ab || ab.byteLength === 0 || ab.byteLength > 3 * 1024 * 1024) return null;
+    if (!ab || ab.byteLength === 0 || ab.byteLength > maxBytes) return null;
     return { buf: Buffer.from(ab), mime: String(mj?.mime_type || "") };
   } catch {
     return null;
@@ -156,17 +186,20 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
   try {
   // Pipe + chat diminta paralel sejak awal: total ≈ max(pipe, chat), bukan jumlah.
   let inc: { from: string; text: string } | null = null;
-  let med: { from: string; kind: "voice" | "image"; mediaId: string; mime: string; waId: string; caption: string } | null = null;
+  let med: { from: string; kind: "voice" | "image" | "document"; mediaId: string; mime: string; waId: string; caption: string; filename: string } | null = null;
+  let loc: { from: string; latitude: number; longitude: number; name: string; address: string; waId: string } | null = null;
   try {
     const payload = JSON.parse(raw.toString("utf-8"));
     const val = payload?.entry?.[0]?.changes?.[0]?.value;
     inc = pickIncoming(val);
     if (!inc) med = pickMedia(val);
+    if (!inc && !med) loc = pickLocation(val);
     const eid = String(payload?.entry?.[0]?.id || "");
-    if (eid) console.log(`[wa-fwd] waba=${eid} from=${inc?.from || med?.from || "-"} msglen=${(inc?.text || "").length} med=${med ? med.kind + ":" + med.mediaId.slice(0, 12) : "-"}`);
+    if (eid) console.log(`[wa-fwd] waba=${eid} from=${inc?.from || med?.from || loc?.from || "-"} msglen=${(inc?.text || "").length} med=${med ? med.kind + ":" + med.mediaId.slice(0, 12) : "-"} loc=${loc ? loc.latitude.toFixed(4) + "," + loc.longitude.toFixed(4) : "-"}`);
   } catch {
     inc = null;
     med = null;
+    loc = null;
   }
   const pipeP = fetch(backend + "/api/webhook/whatsapp", {
     method: "POST",
@@ -198,9 +231,9 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
   // Media: unduh dari Graph lalu lempar ke backend /api/wa-media (paralel dgn pipe).
   const medP: Promise<any> = med
     ? (async () => {
-        const dl = await downloadWaMedia((med as any).mediaId);
+        const dl = await downloadWaMedia((med as any).mediaId, (med as any).kind === "document" ? 5 * 1024 * 1024 : 3 * 1024 * 1024);
         if (!dl) {
-          console.error("[wa-media] unduh gagal/terlalu besar (>3MB)");
+          console.error("[wa-media] unduh gagal/terlalu besar");
           return null;
         }
         const mCtl = new AbortController();
@@ -217,6 +250,7 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
               senderPhone: (med as any).from,
               waId: (med as any).waId,
               caption: (med as any).caption || "",
+              filename: (med as any).filename || "",
             }),
             signal: mCtl.signal,
           });
@@ -226,6 +260,35 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
           return null;
         } finally {
           clearTimeout(mT);
+        }
+      })()
+    : Promise.resolve(null);
+  // ShareLoc: teruskan koordinat ke backend /api/wa-location (paralel dgn pipe).
+  const locP: Promise<any> = loc
+    ? (async () => {
+        const lCtl = new AbortController();
+        const lBudget = Math.max(2000, Math.min(7000, remaining() - 1500));
+        const lT = setTimeout(() => lCtl.abort(), lBudget);
+        try {
+          const lr = await fetch(backend + "/api/wa-location", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-tani-forward-secret": fwd },
+            body: JSON.stringify({
+              latitude: (loc as any).latitude,
+              longitude: (loc as any).longitude,
+              name: (loc as any).name || "",
+              address: (loc as any).address || "",
+              senderPhone: (loc as any).from,
+              waId: (loc as any).waId || "",
+            }),
+            signal: lCtl.signal,
+          });
+          if (!lr.ok) return null;
+          return await lr.json().catch(() => null);
+        } catch {
+          return null;
+        } finally {
+          clearTimeout(lT);
         }
       })()
     : Promise.resolve(null);
@@ -242,14 +305,14 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
     up.text(),
     new Promise<string>((_, rej) => setTimeout(() => rej(new Error("body-timeout")), remaining())),
   ]).catch(() => "");
-  const respondent = inc ? { to: inc.from, p: chatP } : med ? { to: med.from, p: medP } : null;
+  const respondent = inc ? { to: inc.from, p: chatP } : med ? { to: med.from, p: medP } : loc ? { to: loc.from, p: locP } : null;
   if (up.ok && respondent && remaining() > 500) {
     try {
       const ansJson = await Promise.race([
         respondent.p.catch(() => null),
         new Promise((res) => setTimeout(() => res(null), Math.max(0, remaining() - 500))),
       ]);
-      if (!ansJson) console.error("[wa-reply] chat/media kosong/timeout, balasan tidak dikirim");
+      if (!ansJson) console.error("[wa-reply] chat/media/location kosong/timeout, balasan tidak dikirim");
       const reply = String((ansJson && ansJson.reply) || "").trim();
       // Jangan teruskan pesan error gerbang sebagai balasan WA.
       if (reply && !/sesi dashboard berakhir/i.test(reply) && remaining() > 1500) {

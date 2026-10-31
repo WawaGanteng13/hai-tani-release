@@ -1,8 +1,9 @@
-import express from "express";
+﻿import express from "express";
 import path from "path";
 import fs from "fs";
 import { spawn, ChildProcess } from "child_process";
 import crypto from "node:crypto";
+import https from "node:https";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import {
@@ -23,10 +24,21 @@ import {
   CashTransaction,
   StockMutation,
   HppReport,
+  UserRecord,
+  UserRole,
+  OnboardingState,
+  FarmerCommodity,
+  Offer,
+  OfferLine,
+  OfferStatus,
+  FeedbackRecord,
+  FeedbackKategori,
+  DocumentRecord,
 } from "./src/types";
 import { calculateFertilizerRecommendation } from "./src/utils/agronomy";
 import { nextId } from "./lib/next-id";
 import { nextSheetRow } from "./lib/sheet-row";
+import { initSheetsSync, enqueueSheetSync, drainSheetsQueue, getSheetsStatus, getSheetsRemote } from "./lib/sheets-sync";
 import multer from "multer";
 
 dotenv.config();
@@ -45,6 +57,22 @@ let suppliersDb: SupplierRecord[] = [...INITIAL_SUPPLIERS];
 let cashDb: CashTransaction[] = [];
 let stockDb: StockMutation[] = [];
 let hppDb: HppReport[] = [];
+
+// F1: identitas + onboarding + anti-spam per nomor WA (disk-backed).
+let usersDb: UserRecord[] = [];
+const SUPER_ADMIN_PHONE = (process.env.SUPER_ADMIN_PHONE || "6281977358208").trim();
+
+// F2: multi-komoditas append-only (disk-backed).
+let komoditasDb: FarmerCommodity[] = [];
+
+// F3: negosiator buyer-petani (disk-backed).
+let offersDb: Offer[] = [];
+
+// F7: log Saran & Masukan (disk-backed).
+let feedbackDb: FeedbackRecord[] = [];
+
+// F8: dokumen WA terparsing (disk-backed).
+let documentsDb: DocumentRecord[] = [];
 
 // Harga pasar live SISKAPERBAPO Disperindag Jatim (cache 30 menit)
 interface PasarPrice {
@@ -203,7 +231,146 @@ async function fetchPasarKomoditas(id: number): Promise<PasarRow[]> {
   return [];
 }
 
+// Harga sayur live Pasar Mantung Kab. Malang (Dinas TPH / mantung.malangkab.go.id,
+// ~40 komoditas sayur, update harian). Sertifikat TLS situs ini tidak dikenali
+// Node -> pakai https.request rejectUnauthorized:false KHUSUS host ini (data publik).
+interface MantungPrice {
+  nama: string;
+  satuan: string;
+  harga: number;
+  trend: string;
+  alasan: string;
+}
+let mantungCache: { at: number; tanggal: string; daftar: MantungPrice[] } | null = null;
+
+function fetchHttpsTextInsecure(url: string, redirects = 2): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      { rejectUnauthorized: false, timeout: 15000, headers: { "User-Agent": "TaniAI-HargaBot/1.0" } },
+      (res) => {
+        const loc = res.headers.location;
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && loc && redirects > 0) {
+          res.resume();
+          fetchHttpsTextInsecure(new URL(loc, url).toString(), redirects - 1).then(resolve, reject);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error("HTTP " + res.statusCode));
+          return;
+        }
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => {
+          body += c;
+          if (body.length > 2 * 1024 * 1024) {
+            req.destroy();
+            reject(new Error("respons terlalu besar"));
+          }
+        });
+        res.on("end", () => resolve(body));
+        res.on("error", reject);
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+  });
+}
+
+const EN_MONTH: Record<string, string> = {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", mei: "05", jun: "06",
+  jul: "07", aug: "08", agu: "08", sep: "09", oct: "10", okt: "10", nov: "11", dec: "12", des: "12",
+};
+
+function mantungDateId(raw: string): string {
+  const m = (raw || "").match(/(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/);
+  if (!m) return (raw || "").trim();
+  const mo = EN_MONTH[m[2].slice(0, 3).toLowerCase()] || "01";
+  return `${m[1].padStart(2, "0")}-${mo}-${m[3]}`;
+}
+
+async function fetchHargaMantung(): Promise<{ tanggal: string; daftar: MantungPrice[]; live: boolean }> {
+  const now = Date.now();
+  if (mantungCache && now - mantungCache.at < PASAR_TTL_MS) {
+    return { tanggal: mantungCache.tanggal, daftar: mantungCache.daftar, live: false };
+  }
+  const d = new Date();
+  const todayId = `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
+  try {
+    const html = await fetchHttpsTextInsecure("https://mantung.malangkab.go.id/");
+    const strip = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const daftar: MantungPrice[] = [];
+    const dates: string[] = [];
+    const seenNames = new Set<string>();
+    for (const chunk of html.split("Lihat Detail")) {
+      const t = strip(chunk).slice(-500);
+      // Tempered groups: nama & alasan tak boleh menelan blok harga kartu sebelumnya.
+      const m = t.match(/((?:(?!Rp\s*[\d.]|Update:)[\s\S]){2,70}?)\s*Rp\s*([\d.]+)\s*\/\s*([A-Za-z]+)\s*(Naik|Turun|Stabil)?((?:(?!Rp\s*[\d.])[\s\S]){0,120}?)\s*Update:\s*(\d{1,2}\s+\w+\s+\d{4})?\s*$/);
+      if (!m) continue;
+      const nama = m[1].replace(/^[\s\S]*?(Tutup|Export to CSV)\s+/, "").replace(/\s+/g, " ").trim();
+      const harga = parseIdNumber(m[2] || "");
+      if (!nama || nama.length < 2 || /harga sayuran/i.test(nama) || harga === undefined || seenNames.has(nama.toLowerCase())) continue;
+      seenNames.add(nama.toLowerCase());
+      daftar.push({ nama, satuan: m[3] || "Kg", harga, trend: m[4] || "Stabil", alasan: (m[5] || "").replace(/\s+/g, " ").trim() });
+      if (m[6]) dates.push(m[6]);
+    }
+    if (daftar.length > 0) {
+      const freq = new Map<string, number>();
+      for (const x of dates) freq.set(x, (freq.get(x) || 0) + 1);
+      let mode = "";
+      let best = 0;
+      for (const [x, c] of freq) if (c > best) { best = c; mode = x; }
+      const tanggal = mode ? mantungDateId(mode) : todayId;
+      mantungCache = { at: now, tanggal, daftar };
+      return { tanggal, daftar, live: true };
+    }
+  } catch (e) {
+    console.log("[HargaMantung] fetch gagal, pakai cache:", (e as Error)?.message || e);
+  }
+  if (mantungCache) return { tanggal: mantungCache.tanggal, daftar: mantungCache.daftar, live: false };
+  return { tanggal: todayId, daftar: [], live: false };
+}
+
+// Alias query user -> nama komoditas di Pasar Mantung (komoditas yg tumpang tindih
+// dengan SISKAPERBAPO dijawab dari KEDUA sumber agar petani bisa membandingkan).
+const MANTUNG_ALIAS: Array<{ keys: string[]; match: string[] }> = [
+  { keys: ["rawit"], match: ["cabe rawit"] },
+  { keys: ["keriting"], match: ["cabe keriting"] },
+  { keys: ["cabe besar"], match: ["cabe besar"] },
+  { keys: ["cabai", "cabe", "lombok"], match: ["cabe rawit", "cabe keriting", "cabe besar"] },
+  { keys: ["bawang merah"], match: ["bawang merah"] },
+  { keys: ["bawang putih"], match: ["bawang putih"] },
+  { keys: ["daun bawang", "bawang prei", "prei", "layur", "segon"], match: ["prei", "layur", "segon"] },
+  { keys: ["bombay", "bombai"], match: ["bombay"] },
+  { keys: ["tomat"], match: ["tomat buah", "tomat sayur"] },
+  { keys: ["kentang"], match: ["kentang"] },
+  { keys: ["kubis", "kol"], match: ["kubis"] },
+  { keys: ["wortel", "wortal"], match: ["wortel"] },
+  { keys: ["buncis"], match: ["buncis"] },
+  { keys: ["brokoli", "brocoli"], match: ["brokoli"] },
+  { keys: ["bunga kol", "kembang kol"], match: ["bunga kol"] },
+  { keys: ["sawi"], match: ["sawi daging", "sawi putih"] },
+  { keys: ["seledri", "sledri"], match: ["seledri"] },
+  { keys: ["terong", "terung"], match: ["terong"] },
+  { keys: ["timun", "ketimun"], match: ["timun", "ketimun"] },
+  { keys: ["selada"], match: ["selada"] },
+  { keys: ["andewi", "endive"], match: ["andewi"] },
+  { keys: ["jamur"], match: ["jamur kuping", "jamur tiram"] },
+  { keys: ["kapri"], match: ["kapri"] },
+  { keys: ["lobak"], match: ["lobak"] },
+  { keys: ["manisa", "labusiem", "labu siem", "siem"], match: ["manisa", "labusiem"] },
+  { keys: ["kacang merah"], match: ["kacang merah"] },
+];
+
+function mantungTrendEmoji(t: string): string {
+  if (/naik/i.test(t || "")) return "📈";
+  if (/turun/i.test(t || "")) return "📉";
+  return "➡️";
+}
+
 const PILOT_MARKETS: Array<{ keys: string[]; display: string }> = [
+  { keys: ["mantung", "pujon"], display: "Pasar Mantung" },
   { keys: ["karangploso", "karang ploso"], display: "Pasar Karang Ploso" },
   { keys: ["songgoriti"], display: "Pasar Songgoriti" },
   { keys: ["gentengan"], display: "Pasar Gentengan" },
@@ -247,25 +414,54 @@ function hargaKeyHit(lower: string, key: string): boolean {
 
 async function formatHargaPasarReply(message: string): Promise<string> {
   const lower = (message || "").toLowerCase();
-  const { tanggal, daftar } = await fetchHargaPasar();
-  if (daftar.length === 0) {
-    return `📊 *Informasi Harga Pasar:*\n\nMohon maaf, data harga pasar SISKAPERBAPO Jatim sedang tidak bisa diakses saat ini. Silakan coba lagi beberapa menit lagi atau cek langsung di siskaperbapo.jatimprov.go.id/harga/tabel`;
-  }
-  const byName = (want: string) => daftar.find((p) => p.nama.toLowerCase().includes(want));
+  // Tentukan sumber yg dibutuhkan dari intent dulu (hemat 1 fetch di jalur cepat).
+  const siskaHit = HARGA_ALIAS.find((a) => a.keys.some((k) => hargaKeyHit(lower, k)));
+  const mantungHit = MANTUNG_ALIAS.find((a) => a.keys.some((k) => hargaKeyHit(lower, k)));
+  const sayurGenerik = !siskaHit && !mantungHit && /sayur|lalap/.test(lower);
+  const pasarQ = detectPasar(lower);
+  const isMantungPasar = !!pasarQ && /mantung|pujon/.test(normLok(pasarQ));
+  const isPrei = /daun bawang|bawang prei|\bprei\b|layur|segon/.test(lower);
+  const needSiska = !isPrei && !!(siskaHit || (!mantungHit && !sayurGenerik && !isMantungPasar));
+  const needMantung = !!(mantungHit || sayurGenerik || isMantungPasar);
+  const [s, mt] = await Promise.all([
+    needSiska ? fetchHargaPasar() : Promise.resolve({ tanggal: "", daftar: [] as PasarPrice[], live: false }),
+    needMantung ? fetchHargaMantung() : Promise.resolve({ tanggal: "", daftar: [] as MantungPrice[], live: false }),
+  ]);
+  const tanggal = s.tanggal || mt.tanggal;
+  const byName = (want: string) => s.daftar.find((p) => p.nama.toLowerCase().includes(want));
   let picks: PasarPrice[] = [];
-  for (const a of HARGA_ALIAS) {
-    if (a.keys.some((k) => hargaKeyHit(lower, k))) {
-      picks = a.match.map(byName).filter((p): p is PasarPrice => !!p);
-      if (picks.length > 0) break;
+  if (needSiska && s.daftar.length > 0) {
+    for (const a of HARGA_ALIAS) {
+      if (a.keys.some((k) => hargaKeyHit(lower, k))) {
+        picks = a.match.map(byName).filter((p): p is PasarPrice => !!p);
+        if (picks.length > 0) break;
+      }
+    }
+    if (picks.length === 0) {
+      picks = ["beras premium", "cabe rawit merah", "bawang merah", "jagung pipilan kering"]
+        .map(byName)
+        .filter((p): p is PasarPrice => !!p);
     }
   }
-  if (picks.length === 0) {
-    picks = ["beras premium", "cabe rawit merah", "bawang merah", "jagung pipilan kering"]
-      .map(byName)
-      .filter((p): p is PasarPrice => !!p);
+  // Picks Mantung: semua varian yg cocok (maks 6 baris, dedup nama).
+  const mWant: string[] = mantungHit
+    ? mantungHit.match
+    : (sayurGenerik || isMantungPasar ? ["tomat", "cabe rawit", "bawang merah", "kubis", "wortel", "kentang"] : []);
+  const seen = new Set<string>();
+  const mPicks: MantungPrice[] = [];
+  for (const w of mWant) {
+    for (const p of mt.daftar) {
+      if (p.nama.toLowerCase().includes(w) && !seen.has(p.nama)) {
+        seen.add(p.nama);
+        mPicks.push(p);
+      }
+    }
   }
-  const pasarQ = detectPasar(lower);
-  if (pasarQ) {
+  const mLinesAll = mPicks.slice(0, 6).map((p) => {
+    const extra = p.alasan && /naik|turun/i.test(p.trend) ? ` — ${p.alasan}` : "";
+    return `• ${p.nama} *(Mantung)*: Rp ${p.harga.toLocaleString("id-ID")}/${p.satuan} ${mantungTrendEmoji(p.trend)}${extra}`;
+  });
+  if (pasarQ && !isMantungPasar && picks.length > 0) {
     const withId = picks
       .map((p) => ({ p, id: komoditasIdOf(p.nama) }))
       .filter((x): x is { p: PasarPrice; id: number } => x.id !== undefined);
@@ -289,12 +485,23 @@ async function formatHargaPasarReply(message: string): Promise<string> {
         return `• ${x.p.nama}: data pasar tidak ada, rata-rata Jatim Rp ${x.p.harga.toLocaleString("id-ID")}/${x.p.satuan}`;
       });
       if (foundAny) {
-        return `📊 *Harga Pasar (${tanggal}):*\n${mLines.join("\n")}\n\n🔎 _Sumber: SISKAPERBAPO Disperindag Jatim_\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
+        const banding = mLinesAll.length > 0 ? `\n\n⚖️ *Pembanding Pasar Mantung (${mt.tanggal}):*\n${mLinesAll.join("\n")}` : "";
+        const src = mLinesAll.length > 0
+          ? "SISKAPERBAPO Disperindag Jatim + Pasar Mantung Kab. Malang"
+          : "SISKAPERBAPO Disperindag Jatim";
+        return `📊 *Harga Pasar (${tanggal}):*\n${mLines.join("\n")}${banding}\n\n🔎 _Sumber: ${src}_\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
       }
     }
   }
+  if (picks.length === 0 && mPicks.length === 0) {
+    return `📊 *Informasi Harga Pasar:*\n\nMohon maaf, data harga pasar SISKAPERBAPO Jatim sedang tidak bisa diakses saat ini. Silakan coba lagi beberapa menit lagi atau cek langsung di siskaperbapo.jatimprov.go.id/harga/tabel`;
+  }
   const lines = picks.map((p) => `• ${p.nama}: Rp ${p.harga.toLocaleString("id-ID")}/${p.satuan}`);
-  return `📊 *Harga Pasar Jatim (${tanggal}):*\n${lines.join("\n")}\n\n🔎 _Sumber: SISKAPERBAPO Disperindag Jatim_\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
+  const src: string[] = [];
+  if (picks.length > 0) src.push("SISKAPERBAPO Disperindag Jatim");
+  if (mLinesAll.length > 0) src.push(`Pasar Mantung Kab. Malang (${mt.tanggal})`);
+  const head = picks.length > 0 && mLinesAll.length === 0 ? `📊 *Harga Pasar Jatim (${tanggal}):*` : `📊 *Harga Pasar (${tanggal}):*`;
+  return `${head}\n${[...lines, ...mLinesAll].join("\n")}\n\n🔎 _Sumber: ${src.join(" + ")}_\n\nApakah Bapak/Ibu ingin mendaftarkan komoditas dan perkiraan waktu panen?`;
 }
 
 // Disk-backed persistence directories & paths
@@ -305,6 +512,12 @@ const SUPPLIERS_FILE = path.join(DATA_DIR, "suppliers_db.json");
 const CASH_FILE = path.join(DATA_DIR, "cash_db.json");
 const STOCK_FILE = path.join(DATA_DIR, "stock_db.json");
 const HPP_FILE = path.join(DATA_DIR, "hpp_db.json");
+const USERS_FILE = path.join(DATA_DIR, "users_db.json");
+const KOMODITAS_FILE = path.join(DATA_DIR, "komoditas_db.json");
+const OFFERS_FILE = path.join(DATA_DIR, "offers_db.json");
+const FEEDBACK_FILE = path.join(DATA_DIR, "feedback_db.json");
+const FEEDBACK_CSV = path.join(DATA_DIR, "feedback_db.csv");
+const DOCUMENTS_FILE = path.join(DATA_DIR, "documents_db.json");
 
 // Webhook audit logs
 let webhookLogs: Array<{ id: string; timestamp: string; event: string; detail: string; status: string }> = [
@@ -385,6 +598,100 @@ function initPersistence() {
       console.log(`[Storage] Berhasil memuat ${hppDb.length} laporan HPP dari disk (${HPP_FILE})`);
     }
 
+    const usersData = readJsonSafe<unknown>(USERS_FILE, [], "users_db.json");
+    if (Array.isArray(usersData) && usersData.length > 0) {
+      usersDb = usersData as UserRecord[];
+      console.log(`[Storage] Berhasil memuat ${usersDb.length} user WA dari disk (${USERS_FILE})`);
+    }
+
+    const offersData = readJsonSafe<unknown>(OFFERS_FILE, [], "offers_db.json");
+    if (Array.isArray(offersData) && offersData.length > 0) {
+      offersDb = offersData as Offer[];
+      console.log(`[Storage] Berhasil memuat ${offersDb.length} penawaran negosiasi dari disk (${OFFERS_FILE})`);
+    }
+
+    const feedbackData = readJsonSafe<unknown>(FEEDBACK_FILE, [], "feedback_db.json");
+    if (Array.isArray(feedbackData) && feedbackData.length > 0) {
+      feedbackDb = feedbackData as FeedbackRecord[];
+      console.log(`[Storage] Berhasil memuat ${feedbackDb.length} saran/masukan dari disk (${FEEDBACK_FILE})`);
+    }
+    const docData = readJsonSafe<unknown>(DOCUMENTS_FILE, [], "documents_db.json");
+    if (Array.isArray(docData) && docData.length > 0) {
+      documentsDb = docData as DocumentRecord[];
+      console.log(`[Storage] Berhasil memuat ${documentsDb.length} dokumen dari disk (${DOCUMENTS_FILE})`);
+    }
+
+    const kmdData = readJsonSafe<unknown>(KOMODITAS_FILE, [], "komoditas_db.json");
+    if (Array.isArray(kmdData) && kmdData.length > 0) {
+      komoditasDb = kmdData as FarmerCommodity[];
+      console.log(`[Storage] Berhasil memuat ${komoditasDb.length} komoditas dari disk (${KOMODITAS_FILE})`);
+    }
+    // F2: migrasi sekali-jalan — tiap petani tanpa baris KMD dapat 1 baris AKTIF
+    // dari field legacy-nya. Idempoten (petani berbaris dilewati).
+    {
+      let added = 0;
+      const now = new Date().toISOString();
+      for (const f of farmersDb) {
+        const has = komoditasDb.some((k) => k.farmerId === f.id);
+        if (has || !String(f.komoditas || "").trim()) continue;
+        komoditasDb.push({
+          id: nextId("KMD", komoditasDb.map((k) => k.id)),
+          farmerId: f.id,
+          komoditas: String(f.komoditas).trim(),
+          varietas: f.varietas || "",
+          luasHa: Number(f.luasLahan) || 0,
+          estimasiPanen: f.estimasiPanen || "",
+          estimasiHasilTon: Number(f.estimasiHasilTon) || 0,
+          status: "AKTIF",
+          createdAt: now,
+          updatedAt: now,
+        });
+        added++;
+      }
+      if (added > 0) {
+        saveKomoditasToDisk();
+        console.log(`[Storage] Migrasi F2: ${added} baris komoditas dari data legacy.`);
+      }
+    }
+
+    // F1: migrasi SUPER_ADMIN kanonis (env SUPER_ADMIN_PHONE, default ADM-006).
+    // Idempoten + reversibel (ubah env bila nomor berganti).
+    const saHit = adminsDb.find((a) => normalizePhone(a.noHp) === normalizePhone(SUPER_ADMIN_PHONE) && a.aktif);
+    if (saHit && saHit.role !== "SUPER_ADMIN") {
+      saHit.role = "SUPER_ADMIN";
+      saveAdminsToDisk();
+      console.log(`[Storage] ${saHit.id} diangkat SUPER_ADMIN (${maskPhone(saHit.noHp)})`);
+    }
+
+    // F3: migrasi terminologi tengkulak→buyer (sekali-jalan, idempoten).
+    // Nilai lama di disk: users role "TENGKULAK", suppliers kategori
+    // "Offtaker & Pengepul". Riwayat events_db.json dibiarkan apa adanya.
+    {
+      let migrated = 0;
+      for (const u of usersDb) {
+        if ((u as { role?: string }).role === "TENGKULAK") {
+          u.role = "BUYER";
+          migrated++;
+        }
+      }
+      for (const s of suppliersDb) {
+        const rec = s as unknown as { kategori?: string; nama?: string };
+        if (rec.kategori === "Offtaker & Pengepul") {
+          rec.kategori = "Buyer & Offtaker";
+          migrated++;
+        }
+        if (typeof rec.nama === "string" && rec.nama.includes("Offtaker & Pengepul")) {
+          rec.nama = rec.nama.replace(/Offtaker & Pengepul/g, "Buyer");
+          migrated++;
+        }
+      }
+      if (migrated > 0) {
+        saveUsersToDisk();
+        saveSuppliersToDisk();
+        console.log(`[Storage] Migrasi F3 terminologi buyer: ${migrated} baris.`);
+      }
+    }
+
     // Event log dimuat terpisah via loadEventsDb() (dipanggil di startServer,
     // setelah semua deklarasi top-level — menghindari TDZ).
   } catch (err) {
@@ -437,7 +744,7 @@ function trainingLog(entry: Record<string, unknown>): void {
   }
 }
 // Simpan biner media untuk training; kembalikan path relatif ("" bila gagal).
-function trainingSaveMedia(kind: "voice" | "image", buf: Buffer, mime: string): string {
+function trainingSaveMedia(kind: "voice" | "image" | "document", buf: Buffer, mime: string): string {
   try {
     const day = new Date().toISOString().slice(0, 10);
     const dir = path.join(TRAINING_DIR, "media", day);
@@ -449,7 +756,12 @@ function trainingSaveMedia(kind: "voice" | "image", buf: Buffer, mime: string): 
       : m.includes("ogg") ? "ogg"
       : m.includes("mp3") || m.includes("mpeg") ? "mp3"
       : m.includes("wav") ? "wav"
-      : kind === "image" ? "jpg" : "webm";
+      : m.includes("pdf") ? "pdf"
+      : m.includes("wordprocessingml") || m.includes("msword") ? "docx"
+      : m.includes("spreadsheetml") || m.includes("ms-excel") ? "xlsx"
+      : m.includes("csv") ? "csv"
+      : m.includes("text/plain") ? "txt"
+      : kind === "image" ? "jpg" : kind === "document" ? "bin" : "webm";
     const id = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
     const rel = `media/${day}/${kind}-${id}.${ext}`;
     fs.writeFileSync(path.join(TRAINING_DIR, rel), buf);
@@ -485,13 +797,164 @@ function saveHppToDisk() {
   writeJsonAtomic(HPP_FILE, hppDb, "hpp_db.json");
 }
 
+function saveUsersToDisk() {
+  writeJsonAtomic(USERS_FILE, usersDb, "users_db.json");
+}
+
+function saveKomoditasToDisk() {
+  writeJsonAtomic(KOMODITAS_FILE, komoditasDb, "komoditas_db.json");
+}
+
+function saveOffersToDisk() {
+  writeJsonAtomic(OFFERS_FILE, offersDb, "offers_db.json");
+}
+
+function saveFeedbackToDisk() {
+  writeJsonAtomic(FEEDBACK_FILE, feedbackDb, "feedback_db.json");
+  // CSV audit append-only (selalu tulis-ulang ringan: skala kecil).
+  try {
+    const q = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const lines = ["id,tanggal,nama,phone,kategori,pesan,konteks,status,waktuCatat",
+      ...feedbackDb.map((f) => [f.id, f.tanggal, f.nama, f.phone, f.kategori, f.pesan, f.konteks, f.status, f.waktuCatat].map(q).join(","))];
+    fs.writeFileSync(FEEDBACK_CSV, lines.join("\n") + "\n");
+  } catch (err) { console.error("[Storage] Gagal tulis feedback_db.csv:", (err as any)?.message || err); }
+}
+
+// F7: catat saran/komplain/ketidaktahuan -> JSON + event (cermin Sheets otomatis).
+function logFeedback(phone: string, kategori: FeedbackKategori, pesan: string, konteks?: string): FeedbackRecord {
+  const now = new Date().toISOString();
+  const me = normalizePhone(phone);
+  const fr = farmersDb.find((f) => normalizePhone(f.noHp) === me);
+  const rec: FeedbackRecord = {
+    id: nextId("FDB", feedbackDb.map((f) => f.id)),
+    tanggal: now.substring(0, 10),
+    phone: String(phone || ""),
+    nama: fr?.nama || undefined,
+    kategori,
+    pesan: sanitizeText(pesan, 500) || "(kosong)",
+    konteks: konteks ? sanitizeText(konteks, 300) : undefined,
+    status: "BARU",
+    waktuCatat: now,
+  };
+  feedbackDb.unshift(rec);
+  saveFeedbackToDisk();
+  bumpDataVersion();
+  emitCanonicalEvent({
+    source: "wa-chat", entity: "feedback", entityId: rec.id,
+    action: "create", actor: phone,
+    payload: { kategori, status: "BARU" },
+  });
+  return rec;
+}
+
+function saveDocumentsToDisk() {
+  writeJsonAtomic(DOCUMENTS_FILE, documentsDb, "documents_db.json");
+}
+
+// F8: parsing dokumen WA (PDF/DOCX/XLSX/CSV/TXT). Dynamic-import agar boot
+// tetap cepat; pdf-parse v2 API kelas (new PDFParse({data}).getText()).
+async function parseDocumentBuffer(buf: Buffer, mime: string, filename: string): Promise<{ text: string; tipe: string }> {
+  const m = String(mime || "").toLowerCase();
+  const fn = String(filename || "").toLowerCase();
+  const isPdf = m.includes("pdf") || fn.endsWith(".pdf");
+  const isDocx = m.includes("wordprocessingml") || m.includes("msword") || fn.endsWith(".docx") || fn.endsWith(".doc");
+  const isXlsx = m.includes("spreadsheetml") || m.includes("ms-excel") || fn.endsWith(".xlsx") || fn.endsWith(".xls");
+  const isCsv = m.includes("csv") || fn.endsWith(".csv");
+  const isTxt = m.includes("text/plain") || fn.endsWith(".txt");
+  if (isPdf) {
+    const mod: any = await import("pdf-parse");
+    const parser = new mod.PDFParse({ data: buf });
+    const r = await parser.getText();
+    return { text: String(r?.text || ""), tipe: "pdf" };
+  }
+  if (isDocx) {
+    const mammoth: any = await import("mammoth");
+    const r = await mammoth.extractRawText({ buffer: buf });
+    return { text: String(r?.value || ""), tipe: "docx" };
+  }
+  if (isXlsx) {
+    const XLSX: any = await import("xlsx");
+    const wb = XLSX.read(buf, { type: "buffer" });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    return { text: String(XLSX.utils.sheet_to_csv(ws) || ""), tipe: "xlsx" };
+  }
+  if (isCsv || isTxt) return { text: buf.toString("utf-8"), tipe: isCsv ? "csv" : "txt" };
+  throw new Error("format belum didukung");
+}
+
+const DOC_SAPRODI = ["pupuk", "urea", "npk", "phonska", "kcl", "tsp", "sp36", "za", "kompos",
+  "pestisida", "insektisida", "fungisida", "herbisida", "bibit", "benih",
+  "traktor", "sprayer", "pompa", "cangkul"];
+
+// F8: ekstraksi entitas deterministik (tanpa LLM): kosakata komoditas reuse
+// HARGA_ALIAS, harga via pola Rp, saprodi/alat via daftar kunci.
+function extractDocEntities(text: string): { komoditas: string[]; harga: string[]; saprodi: string[] } {
+  const t = String(text || "").toLowerCase();
+  const kom: string[] = [];
+  for (const a of HARGA_ALIAS) for (const k of a.keys) {
+    if (k.length < 3 || kom.includes(k)) continue;
+    try {
+      if (new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t)) kom.push(k);
+    } catch { /* kunci tak-valid dilewati */ }
+  }
+  const harga = Array.from(new Set(
+    (String(text || "").match(/rp\.?\s?[\d][\d.\s]*(?:,\d{1,2})?/gi) || []).map((s) => s.trim().slice(0, 24))
+  )).slice(0, 20);
+  const sap: string[] = [];
+  for (const s of DOC_SAPRODI) {
+    if (sap.includes(s)) continue;
+    try {
+      if (new RegExp(`\\b${s}\\b`).test(t)) sap.push(s);
+    } catch { /* abaikan */ }
+  }
+  return { komoditas: kom.slice(0, 20), harga, saprodi: sap };
+}
+
+// F8: catat dokumen terparsing -> JSON + event (tanpa cermin Sheets).
+function logDocument(phone: string, namaFile: string, tipe: string, ukuranByte: number,
+    ent: { komoditas: string[]; harga: string[]; saprodi: string[] }, mediaPath: string): DocumentRecord {
+  const now = new Date().toISOString();
+  const me = normalizePhone(phone);
+  const fr = farmersDb.find((f) => normalizePhone(f.noHp) === me);
+  const ringkasan = [
+    ent.komoditas.length ? `${ent.komoditas.length} komoditas (${ent.komoditas.slice(0, 5).join(", ")})` : "",
+    ent.harga.length ? `${ent.harga.length} harga` : "",
+    ent.saprodi.length ? `${ent.saprodi.length} saprodi/alat (${ent.saprodi.slice(0, 5).join(", ")})` : "",
+  ].filter(Boolean).join("; ") || "tidak ada entitas dikenali";
+  const rec: DocumentRecord = {
+    id: nextId("DOC", documentsDb.map((d) => d.id)),
+    tanggal: now.substring(0, 10),
+    phone: String(phone || ""),
+    nama: fr?.nama || undefined,
+    namaFile: sanitizeText(namaFile, 200) || "(tanpa nama)",
+    tipe: String(tipe || "lainnya"),
+    ukuranByte: Number(ukuranByte) || 0,
+    komoditas: ent.komoditas,
+    harga: ent.harga,
+    saprodi: ent.saprodi,
+    ringkasan,
+    mediaPath: mediaPath || undefined,
+    waktuCatat: now,
+  };
+  documentsDb.unshift(rec);
+  saveDocumentsToDisk();
+  bumpDataVersion();
+  emitCanonicalEvent({
+    source: "wa-media", entity: "document", entityId: rec.id,
+    action: "create", actor: phone,
+    payload: { tipe, komoditas: ent.komoditas.length, harga: ent.harga.length },
+  });
+  return rec;
+}
+
 // Inisialisasi data storage saat server pertama kali booting
 initPersistence();
 
 // Helper to normalize phone numbers for accurate matching (+62, 08, dashes, spaces)
 function normalizePhone(phone?: string): string {
-  if (!phone) return "";
-  let p = phone.replace(/[^0-9]/g, "");
+  const s = String(phone ?? "");
+  if (!s) return "";
+  let p = s.replace(/[^0-9]/g, "");
   if (p.startsWith("62")) {
     p = "0" + p.slice(2);
   }
@@ -632,6 +1095,13 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
     text.match(/(?:nama\s*:\s*)([A-Za-z \t]+?)(?:,|\.|\n|$)/i);
   if (nameMatch && nameMatch[1] && nameMatch[1].trim().length > 2) {
     let raw = nameMatch[1].trim().replace(/^(?:bernama|nama)\s+/i, "").replace(/^[:\-,\s]+/, "").trim();
+    // Ujaran lisan ("nama lengkap petani Jeremy", "petani yang bernama X"):
+    // buang kata pengisi di depan nama sampai titik-tetap.
+    for (let i = 0; i < 5; i++) {
+      const next = raw.replace(/^(?:lengkap|petani|tani|saya|yang|adalah|ini|itu|tersebut|bernama|nama)\s+/i, "").trim();
+      if (next === raw) break;
+      raw = next;
+    }
     const NAME_STOP = new Set(["komoditas", "luas", "lahan", "lokasi", "desa", "kelurahan", "kecamatan", "kabupaten", "kota", "alamat", "wilayah", "hp", "wa", "telepon", "telp", "no", "varietas", "benih", "bibit", "panen", "ton", "kuintal", "hektar", "hektare", "meter"]);
     const nameWords: string[] = [];
     for (const w of raw.split(/\s+/)) {
@@ -639,7 +1109,7 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
       nameWords.push(w);
     }
     raw = nameWords.join(" ").trim();
-    if (raw.length > 2 && !["saya", "petani", "tani", "mitra", "baru", "lahan", "data", "semua", "rekap"].includes(raw.toLowerCase())) {
+    if (raw.length > 2 && !["saya", "yang", "petani", "tani", "mitra", "baru", "lahan", "data", "semua", "rekap"].includes(raw.toLowerCase())) {
       const lowerRaw = raw.toLowerCase();
       if (lowerRaw.startsWith("pak ") || lowerRaw.startsWith("bapak ")) {
         const cleanName = raw.replace(/^(?:pak|bapak)\s+/i, "").trim();
@@ -680,6 +1150,8 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
     ext.komoditas = "Tebu";
   } else if (lower.includes("kelapa") || lower.includes("kopra")) {
     ext.komoditas = "Kelapa";
+  } else if (lower.includes("sagu")) {
+    ext.komoditas = "Sagu";
   }
   if (!ext.komoditas) {
     const komMatch = text.match(/komoditas(?:\s+tanaman)?\s*:?\s*([A-Za-z][A-Za-z \t]*?)(?:,|\.|\n|$)/i);
@@ -739,7 +1211,7 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
   if (diMatch && diMatch[1] && !ext.kabupaten) {
     const candidate = diMatch[1].trim().replace(/^(desa|kelurahan|kecamatan)\s+/i, "")
       .split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-    if (candidate.length >= 3 && !["sawah", "lahan", "kebun", "desa", "sini", "sana", "dinas", "google", "sheets", "database", "rumah", "ladang", "pasar", "kios", "toko", "kantor", "jalan", "masjid"].includes(candidate.toLowerCase())) {
+    if (candidate.length >= 3 && !["sawah", "lahan", "kebun", "desa", "sini", "sana", "dinas", "google", "sheets", "database", "rumah", "ladang", "pasar", "kios", "toko", "kantor", "jalan", "masjid", "komunitas", "kelompok", "indonesia", "tani", "petani"].includes(candidate.toLowerCase())) {
       ext.kabupaten = candidate;
       if (!ext.alamat) ext.alamat = `Desa Binaan, ${candidate}`;
     }
@@ -747,17 +1219,12 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
 
   // 6. Varietas
   const varMatch = text.match(/(?:varietas|benih|bibit)\s+([A-Za-z0-9\s-]+?)(?:,|\.|\n|$)/i);
+  // ANTI-KARANGAN: varietas hanya dari ucapan eksplisit ("varietas/benih/bibit X").
   if (varMatch && varMatch[1]) {
     ext.varietas = varMatch[1].trim();
-  } else if (!ext.varietas && ext.komoditas) {
-    if (ext.komoditas === "Padi") ext.varietas = "Inpari 32";
-    else if (ext.komoditas?.includes("Cabai")) ext.varietas = "Ori 212";
-    else if (ext.komoditas === "Bawang Merah") ext.varietas = "Bima Brebes";
-    else if (ext.komoditas === "Jagung") ext.varietas = "BISI-18 Hibrida";
-    else ext.varietas = "Unggul Lokal";
   }
 
-  // 7. Estimasi Panen
+  // 7. Estimasi Panen (bulan eksplisit ATAU relatif "bulan/minggu/tahun depan").
   const months = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
   for (const m of months) {
     if (lower.includes(m.toLowerCase())) {
@@ -766,16 +1233,49 @@ function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord>
       break;
     }
   }
+  if (!ext.estimasiPanen) {
+    const now = new Date();
+    if (/bulan depan/i.test(text)) {
+      const d = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      ext.estimasiPanen = `${months[d.getMonth()]} ${d.getFullYear()}`;
+    } else if (/bulan ini/i.test(text)) {
+      ext.estimasiPanen = `${months[now.getMonth()]} ${now.getFullYear()}`;
+    } else if (/minggu depan/i.test(text)) {
+      const d = new Date(now.getTime() + 7 * 864e5);
+      ext.estimasiPanen = `${months[d.getMonth()]} ${d.getFullYear()}`;
+    } else if (/tahun depan/i.test(text)) {
+      ext.estimasiPanen = `${now.getFullYear() + 1}`;
+    }
+  }
 
-  // 8. Estimasi Hasil Ton
-  const tonMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(?:ton|kuintal)/i);
+  // 8. Estimasi Hasil Ton — ANTI-KARANGAN (aturan user): hanya dari angka
+  // eksplisit user ("5 ton"/"50 kuintal"); hitung luas×mult DIHAPUS.
+  const tonMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(ton|kuintal|kwintal|kg)\b/i);
   if (tonMatch && tonMatch[1]) {
     let t = parseFloat(tonMatch[1].replace(",", "."));
-    if (text.match(/kuintal/i)) t = Number((t / 10).toFixed(1));
+    const unit = (tonMatch[2] || "").toLowerCase();
+    if (unit.startsWith("ku") || unit.startsWith("kw")) t = Number((t / 10).toFixed(1));
+    else if (unit === "kg") t = Number((t / 1000).toFixed(2));
     ext.estimasiHasilTon = t;
-  } else if (ext.luasLahan) {
-    const mult = ext.komoditas === "Padi" ? 6.2 : ext.komoditas?.includes("Cabai") ? 8.5 : ext.komoditas === "Jagung" ? 7.0 : 5.0;
-    ext.estimasiHasilTon = Number((ext.luasLahan * mult).toFixed(1));
+  }
+
+  // 1b. Nama telanjang susulan: baris pertama 1-3 kata kapital ("Annisa")
+  // diterima sebagai nama HANYA bila draf sudah berisi data non-nama dan nama
+  // masih kosong. Tanpa syarat draf, sapaan ("Gimana") ikut tersedot.
+  if (!ext.nama) {
+    const d = currentDraft || {};
+    const draftHasNonName = !!(d.komoditas || d.luasLahan || d.kabupaten || d.alamat || d.noHp);
+    if (draftHasNonName) {
+      const firstLine = String(text || "").split(/\n/)[0].trim();
+      const mBare = firstLine.match(/^([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})$/);
+      if (mBare) {
+        const words = mBare[1].toLowerCase().split(/\s+/);
+        const BARE_STOP = new Set(["halo", "hai", "hi", "makasih", "terima", "kasih", "tolong", "bantu", "ya", "iya", "tidak", "batal", "udah", "sudah", "belum", "cek", "harga", "pasar", "berapa", "daftar", "tambah", "kirim", "oke", "ok", "siap", "ini", "itu", "ada", "apa", "siapa", "bagaimana", "gimana", "kabar", "baik", "pagi", "siang", "sore", "malam", "cabai", "cabe", "bawang", "jagung", "padi", "beras", "kedelai", "tomat", "kentang", "apel", "melon", "kopi", "kakao", "tebu", "kelapa", "sagu", "desa", "kabupaten", "kota", "lokasi", "alamat", "hektar", "meter"]);
+        if (!words.some((w) => BARE_STOP.has(w)) && !/\d/.test(firstLine)) {
+          ext.nama = `Pak ${mBare[1].trim()}`;
+        }
+      }
+    }
   }
 
   const hasMinimumData = !!(ext.nama || ext.komoditas || ext.luasLahan || ext.kabupaten);
@@ -858,15 +1358,18 @@ function formatIncompleteFarmerPrompt(
     `• Lokasi/Kabupaten: ${draft.kabupaten || draft.alamat ? `✅ *${draft.kabupaten || draft.alamat}*` : "❌ _Belum diisi_"}`,
   ].join("\n");
 
-  const missingList = check.missingFields.map((m, idx) => `${idx + 1}. *${m}*`).join("\n");
+  // Gerbang-no-HP admin: daftar kosong bukan berarti lengkap — sebutkan No HP.
+  const missingList = check.missingFields.length > 0
+    ? check.missingFields.map((m, idx) => `${idx + 1}. *${m}*`).join("\n")
+    : (isAdmin ? `1. *No HP/WA petani* (wajib agar bisa disimpan)` : "");
   const salutation = isAdmin && recipientName ? `Bpk/Ibu *${recipientName}*` : `Bapak/Ibu`;
 
   const reply =
     `📝 *Draf Data Petani Dicatat (Data Belum Lengkap)*\n\n` +
-    `Terima kasih ${salutation}. Data sementara telah kami simpan di draf percakapan, namun *belum dimasukkan ke database Google Sheets* karena data belum lengkap:\n\n` +
+    `Terima kasih ${salutation}. Data sementara telah kami simpan di draf percakapan, namun *belum dimasukkan ke database* karena data belum lengkap:\n\n` +
     `${checklist}\n\n` +
     `⚠️ *Data yang masih harus dilengkapi:*\n${missingList}\n\n` +
-    `💡 *Silakan ketik data kelanjutannya* (contoh: ketik nama, komoditas, luas lahan, atau kabupaten). Begitu seluruh data pokok di atas lengkap, sistem akan langsung memverifikasi dan menyimpannya ke database Google Sheets secara otomatis.`;
+    `💡 *Silakan ketik data kelanjutannya* (contoh: ketik nama, komoditas, luas lahan, atau kabupaten). Begitu seluruh data pokok di atas lengkap, sistem akan langsung memverifikasi dan menyimpannya ke database secara otomatis.`;
 
   const quickReplies: string[] = [];
   if (!draft.komoditas) quickReplies.push("Komoditas Cabai Rawit", "Komoditas Jagung Hibrida");
@@ -882,6 +1385,111 @@ function formatIncompleteFarmerPrompt(
   };
 }
 
+// D2 dedupe: cari existing by noHp ternormalisasi.
+// Kunci = draft.noHp; senderPhone hanya dipakai bila pendaftar BUKAN admin
+// (di jalur admin senderPhone = nomor admin, bukan identitas petani).
+// Nomor placeholder dan string pendek (< 10 digit) ditolak agar tak meniban.
+function findDuplicateFarmerByPhone(
+  draft: Partial<FarmerRecord>,
+  activeAdmin?: AdminUser,
+  senderPhone?: string
+): FarmerRecord | undefined {
+  const rawKey = draft.noHp || (!activeAdmin ? senderPhone : "") || "";
+  const normKey = normalizePhone(rawKey);
+  if (normKey.length < 10) return undefined;
+  return farmersDb.find((f) => normalizePhone(f.noHp) === normKey);
+}
+// Aturan user: nama sama + nomor beda = orang beda (simpan baru); nomor sama
+// = TANYA dulu (Ya/Tidak), jangan timpa diam-diam. Dipakai gerbang pra-simpan.
+function formatDuplicateAskPrompt(existing: FarmerRecord, draft: Partial<FarmerRecord>): string {
+  const fmt = (f: any) => `*${f.nama || "-"}* — ${f.komoditas || "-"}, ${f.luasLahanFormatted || (f.luasLahan ? `${f.luasLahan} Ha` : "-")}, ${f.kabupaten || f.alamat || "-"}`;
+  return (
+    `⚠️ *Nomor WA ini sudah terdaftar!*\n\n` +
+    `• Terdaftar: ${fmt(existing)} (${existing.id})\n` +
+    `• Data baru: ${fmt(draft)}\n\n` +
+    `Apakah ingin *MEMPERBARUI* data lama dengan data baru?\n` +
+    `Balas *Ya* untuk update, atau *Tidak* untuk membatalkan.\n` +
+    `_Bila ini orang berbeda, daftarkan dengan nomor HP/WA yang berbeda._`
+  );
+}
+// ---- ShareLoc WA (pesan location Meta Cloud API) ----
+// Format Meta: msg.type === "location", koordinat di msg.location.latitude /
+// msg.location.longitude (+ msg.location.name / .address opsional).
+// Definisi tunggal: validasi + URL Maps + tulis ke draf/record petani.
+function isValidWaCoords(lat: unknown, lng: unknown): boolean {
+  const la = Number(lat);
+  const ln = Number(lng);
+  if (!Number.isFinite(la) || !Number.isFinite(ln)) return false;
+  if (la < -90 || la > 90 || ln < -180 || ln > 180) return false;
+  if (la === 0 && ln === 0) return false; // Null Island = bukan lokasi nyata
+  return true;
+}
+function waLocationMapsUrl(lat: number, lng: number): string {
+  return `https://maps.google.com/?q=${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}`;
+}
+// Bbox kasar Indonesia; di luar ini diterima tapi ditandai lemah (minta konfirmasi desa).
+function isIndonesiaCoords(lat: number, lng: number): boolean {
+  return Number(lat) >= -11 && Number(lat) <= 6 && Number(lng) >= 95 && Number(lng) <= 141;
+}
+// Tulis koordinat ShareLoc: petani terdaftar -> update record; tamu/belum
+// terdaftar -> simpan ke draf WA agar terbawa saat pendaftaran lengkap.
+function applyWaLocationToFarmer(
+  senderPhone: string | undefined,
+  loc: { latitude: number; longitude: number; name?: string; address?: string },
+  source?: string,
+): { farmerId?: string; updated: boolean; mapsUrl: string; weak: boolean; label: string } {
+  const lat = Number(loc.latitude);
+  const lng = Number(loc.longitude);
+  const mapsUrl = waLocationMapsUrl(lat, lng);
+  const weak = !isIndonesiaCoords(lat, lng);
+  const label = [loc.name, loc.address].filter((s) => String(s || "").trim()).join(", ").slice(0, 200);
+  const normKey = normalizePhone(senderPhone);
+  const hit = normKey.length >= 10
+    ? farmersDb.find((f) => normalizePhone(f.noHp) === normKey)
+    : undefined;
+  if (hit) {
+    hit.latitude = Number(lat.toFixed(6));
+    hit.longitude = Number(lng.toFixed(6));
+    if (label && (!hit.alamat || hit.alamat === "Belum diketahui" || hit.alamat.includes("Sentra Tani"))) {
+      hit.alamat = label;
+    }
+    hit.syncStatus = "synced";
+    saveFarmersToDisk();
+    bumpDataVersion();
+    emitCanonicalEvent({
+      source: source || "wa-location", entity: "farmer", entityId: hit.id,
+      action: "loc_update", actor: senderPhone,
+      payload: { latitude: hit.latitude, longitude: hit.longitude, mapsUrl, label: label || undefined, weak },
+    });
+    return { farmerId: hit.id, updated: true, mapsUrl, weak, label };
+  }
+  if (senderPhone) {
+    let d = waDrafts.get(senderPhone);
+    if (!d || Date.now() - d.updatedAt > WA_DRAFT_TTL_MS) {
+      d = { ...blankWaDraft(), updatedAt: 0 };
+    }
+    d.farmer = {
+      ...cleanStoredDraft(d.farmer),
+      latitude: Number(lat.toFixed(6)),
+      longitude: Number(lng.toFixed(6)),
+      ...(label && !d.farmer?.alamat ? { alamat: label } : {}),
+    };
+    d.updatedAt = Date.now();
+    waDrafts.delete(senderPhone);
+    waDrafts.set(senderPhone, d);
+    while (waDrafts.size > 500) {
+      const oldest = waDrafts.keys().next().value;
+      if (oldest === undefined) break;
+      waDrafts.delete(oldest);
+    }
+  }
+  emitCanonicalEvent({
+    source: source || "wa-location", entity: "farmer", entityId: normKey ? `draft-${hashPhone(senderPhone).slice(0, 12)}` : "draft-unknown",
+    action: "loc_draft", actor: senderPhone,
+    payload: { latitude: Number(lat.toFixed(6)), longitude: Number(lng.toFixed(6)), mapsUrl, label: label || undefined, weak },
+  });
+  return { farmerId: undefined, updated: false, mapsUrl, weak, label };
+}
 // Persist complete record into farmersDb
 function saveFarmerRecord(
   draft: Partial<FarmerRecord>,
@@ -894,10 +1502,8 @@ function saveFarmerRecord(
   // (di jalur admin senderPhone = nomor admin, bukan identitas petani).
   // Nomor placeholder ("+62 812-xxxx-xxxx" → "0812") dan string pendek (< 10 digit)
   // ditolak agar tidak saling meniban.
-  const rawKey = draft.noHp || (!activeAdmin ? senderPhone : "") || "";
-  const normKey = normalizePhone(rawKey);
-  if (normKey.length >= 10) {
-    const existing = farmersDb.find((f) => normalizePhone(f.noHp) === normKey);
+  {
+    const existing = findDuplicateFarmerByPhone(draft, activeAdmin, senderPhone);
     if (existing) {
       existing.nama = draft.nama || existing.nama;
       if (draft.noHp) existing.noHp = draft.noHp;
@@ -907,16 +1513,37 @@ function saveFarmerRecord(
         existing.luasLahan = Number(draft.luasLahan);
         existing.luasLahanFormatted = draft.luasLahanFormatted || `${draft.luasLahan} Ha`;
       }
+      const prevKomoditas = String(existing.komoditas || "").trim().toLowerCase();
       existing.komoditas = draft.komoditas || existing.komoditas;
       existing.varietas = draft.varietas || existing.varietas;
       existing.estimasiPanen = draft.estimasiPanen || existing.estimasiPanen;
+      // ANTI-KARANGAN: tonase update hanya dari angka user; hitung luas×6 DIHAPUS.
       if (draft.estimasiHasilTon && Number(draft.estimasiHasilTon) > 0) {
         existing.estimasiHasilTon = Number(draft.estimasiHasilTon);
-      } else if (draft.luasLahan && Number(draft.luasLahan) > 0) {
-        existing.estimasiHasilTon = Number((Number(draft.luasLahan) * 6).toFixed(1));
+      }
+      // ShareLoc: koordinat riil dari draf (validasi rentang Meta) menimpa tebakan.
+      if (isValidWaCoords((draft as any).latitude, (draft as any).longitude)) {
+        existing.latitude = Number(Number((draft as any).latitude).toFixed(6));
+        existing.longitude = Number(Number((draft as any).longitude).toFixed(6));
       }
       if (activeAdmin) existing.statusVerifikasi = "Terverifikasi";
       existing.syncStatus = "synced";
+      // F2: komoditas BERBEDA -> baris KMD baru; SAMA -> perkaya baris AKTIF.
+      {
+        const newKom = String(draft.komoditas || "").trim();
+        if (newKom && newKom.toLowerCase() !== prevKomoditas) {
+          appendCommodity(existing.id, {
+            komoditas: newKom, varietas: draft.varietas,
+            luasHa: Number(draft.luasLahan) || undefined, estimasiPanen: draft.estimasiPanen,
+            estimasiHasilTon: Number(draft.estimasiHasilTon) || undefined,
+          }, source);
+        } else {
+          enrichLatestCommodity(existing.id, {
+            varietas: draft.varietas, luasHa: Number(draft.luasLahan) || undefined,
+            estimasiPanen: draft.estimasiPanen, estimasiHasilTon: Number(draft.estimasiHasilTon) || undefined,
+          }, source);
+        }
+      }
       saveFarmersToDisk();
       bumpDataVersion();
       emitCanonicalEvent({
@@ -931,24 +1558,33 @@ function saveFarmerRecord(
     id: nextId("TANI", farmersDb.map((f) => f.id)),
     timestamp: new Date().toISOString().replace("T", " ").substring(0, 19),
     nama: draft.nama || "Petani Mitra",
-    noHp: draft.noHp || senderPhone || "+62 812-xxxx-xxxx",
-    alamat: draft.alamat || `Desa Binaan, ${draft.kabupaten || "Subang"}`,
-    kabupaten: draft.kabupaten || "Subang",
+    noHp: draft.noHp || senderPhone || "",
+    // ANTI-KARANGAN (aturan user): tak-diberi-user = kosong, bukan default palsu.
+    alamat: draft.alamat || draft.kabupaten || "Belum diketahui",
+    kabupaten: draft.kabupaten || "Belum diketahui",
     luasLahan: Number(draft.luasLahan) || 1.0,
     luasLahanFormatted: draft.luasLahanFormatted || `${draft.luasLahan || 1.0} Ha`,
     komoditas: draft.komoditas || "Padi",
-    varietas: draft.varietas || "Unggul Lokal",
-    estimasiPanen: draft.estimasiPanen || "Desember 2026",
-    estimasiHasilTon: Number(draft.estimasiHasilTon) || Number((Number(draft.luasLahan || 1.0) * 6).toFixed(1)),
+    varietas: draft.varietas || "",
+    estimasiPanen: draft.estimasiPanen || "",
+    estimasiHasilTon: Number(draft.estimasiHasilTon) || 0,
     statusVerifikasi: activeAdmin ? "Terverifikasi" : "Menunggu Verifikasi",
     catatanAI: activeAdmin
-      ? `Didata & divalidasi langsung oleh ${activeAdmin.nama} (${activeAdmin.role}) via WhatsApp pada ${new Date().toLocaleDateString("id-ID")}. Data lengkap tersinkronisasi ke Google Sheets.`
-      : `Tercatat lengkap via WhatsApp Chatbot pada ${new Date().toLocaleDateString("id-ID")}. Data telah divalidasi dan tersinkronisasi ke Google Sheets.`,
+      ? `Didata & divalidasi langsung oleh ${activeAdmin.nama} (${activeAdmin.role}) via WhatsApp pada ${new Date().toLocaleDateString("id-ID")}. Data lengkap tersimpan ke database.`
+      : `Tercatat lengkap via WhatsApp Chatbot pada ${new Date().toLocaleDateString("id-ID")}. Data telah divalidasi dan tersimpan ke database.`,
     syncStatus: "synced",
     googleSheetRow: nextSheetRow(
       farmersDb.map((f) => f.googleSheetRow),
       farmersDb.length,
     ),
+    // ShareLoc: bawa koordinat riil dari draf bila valid; selain itu kosong
+    // (jangan tebak di sini — resolveCoordinates hanya untuk tampilan peta).
+    ...(isValidWaCoords((draft as any).latitude, (draft as any).longitude)
+      ? {
+          latitude: Number(Number((draft as any).latitude).toFixed(6)),
+          longitude: Number(Number((draft as any).longitude).toFixed(6)),
+        }
+      : {}),
   };
   farmersDb.unshift(newRecord);
   saveFarmersToDisk();
@@ -958,38 +1594,325 @@ function saveFarmerRecord(
     action: "create", actor: senderPhone,
     payload: { nama: newRecord.nama, komoditas: newRecord.komoditas, luasLahan: newRecord.luasLahan, kabupaten: newRecord.kabupaten, statusVerifikasi: newRecord.statusVerifikasi },
   });
+  appendCommodity(newRecord.id, {
+    komoditas: newRecord.komoditas, varietas: newRecord.varietas,
+    luasHa: Number(newRecord.luasLahan) || 0, estimasiPanen: newRecord.estimasiPanen,
+    estimasiHasilTon: Number(newRecord.estimasiHasilTon) || 0,
+  }, source);
   return newRecord;
 }
 
+// ============ F2: multi-komoditas append-only ============
+// Aturan: komoditas BERBEDA -> baris KMD baru; komoditas SAMA -> perkaya baris
+// AKTIF terbaru. Field legacy FarmerRecord.komoditas selalu = KMD AKTIF terbaru.
+function latestCommodity(farmerId: string, onlyActive: boolean): FarmerCommodity | undefined {
+  for (let i = komoditasDb.length - 1; i >= 0; i--) {
+    const k = komoditasDb[i];
+    if (k.farmerId !== farmerId) continue;
+    if (onlyActive && k.status !== "AKTIF") continue;
+    return k;
+  }
+  return undefined;
+}
+function appendCommodity(
+  farmerId: string,
+  d: { komoditas: string; varietas?: string; luasHa?: number; estimasiPanen?: string; estimasiHasilTon?: number; musimTanam?: string },
+  source?: string,
+): FarmerCommodity {
+  const now = new Date().toISOString();
+  const rec: FarmerCommodity = {
+    id: nextId("KMD", komoditasDb.map((k) => k.id)),
+    farmerId,
+    komoditas: String(d.komoditas || "").trim(),
+    varietas: d.varietas || "",
+    luasHa: Number(d.luasHa) || 0,
+    estimasiPanen: d.estimasiPanen || "",
+    estimasiHasilTon: Number(d.estimasiHasilTon) || 0,
+    musimTanam: d.musimTanam || "",
+    status: "AKTIF",
+    createdAt: now,
+    updatedAt: now,
+  };
+  komoditasDb.push(rec);
+  saveKomoditasToDisk();
+  emitCanonicalEvent({
+    source: source || "wa-chat", entity: "commodity", entityId: rec.id,
+    action: "create", actor: "",
+    payload: { farmerId, komoditas: rec.komoditas },
+  });
+  return rec;
+}
+function enrichLatestCommodity(
+  farmerId: string,
+  d: { varietas?: string; luasHa?: number; estimasiPanen?: string; estimasiHasilTon?: number; musimTanam?: string },
+  source?: string,
+): void {
+  const lc = latestCommodity(farmerId, true) || latestCommodity(farmerId, false);
+  if (!lc) return;
+  if (d.varietas) lc.varietas = d.varietas;
+  if (Number(d.luasHa) > 0) lc.luasHa = Number(d.luasHa);
+  if (d.estimasiPanen) lc.estimasiPanen = d.estimasiPanen;
+  if (Number(d.estimasiHasilTon) > 0) lc.estimasiHasilTon = Number(d.estimasiHasilTon);
+  if (d.musimTanam) lc.musimTanam = d.musimTanam;
+  lc.updatedAt = new Date().toISOString();
+  saveKomoditasToDisk();
+  emitCanonicalEvent({
+    source: source || "wa-chat", entity: "commodity", entityId: lc.id,
+    action: "update", actor: "",
+    payload: { farmerId, komoditas: lc.komoditas },
+  });
+}
+// Sinkronkan field legacy ke KMD AKTIF terbaru (bila tak ada AKTIF: biarkan).
+function syncLegacyCommodityFields(f: FarmerRecord): void {
+  const last = latestCommodity(f.id, true);
+  if (!last) return;
+  f.komoditas = last.komoditas;
+  f.varietas = last.varietas || "";
+  f.estimasiPanen = last.estimasiPanen || "";
+  if (Number(last.estimasiHasilTon) > 0) f.estimasiHasilTon = Number(last.estimasiHasilTon);
+  if (Number(last.luasHa) > 0) {
+    f.luasLahan = Number(last.luasHa);
+    f.luasLahanFormatted = `${last.luasHa} Ha`;
+  }
+}
+
+// ============ F3: negosiator buyer-petani ============
+// Aturan Wawa: harga jual DITANYA dulu ke petani (tak pernah mengacu harga
+// pasar); cocok bila <= budget buyer; selisih masuk kas Hai Tani; stok
+// dilaporkan jujur apa adanya (kurang -> tawarkan agregasi multi-petani).
+function parseQtyKg(s: string): number | undefined {
+  const m = String(s || "").match(/(\d+(?:[.,]\d+)?)\s*(ton|kuintal|kwintal|kilogram|kg|kilo|t\b|kw\b)/i);
+  if (!m) return undefined;
+  const v = Number(m[1].replace(/\./g, "").replace(/,/g, "."));
+  if (!Number.isFinite(v) || v <= 0) return undefined;
+  const u = m[2].toLowerCase();
+  if (u.startsWith("ton") || u === "t") return v * 1000;
+  if (u.startsWith("ku") || u.startsWith("kw")) return v * 100;
+  return v;
+}
+// "50000", "50.000", "50rb", "8,5rb", "Rp 8.500/kg" -> rupiah per kg.
+// Tolak di luar 100..2.000.000 agar qty ("10 kg") tak terbaca sebagai harga.
+function parseRpPerKg(s: string): number | undefined {
+  const t = String(s || "").toLowerCase();
+  const clause = t.match(/(?:harga|budget|jual|tawar|minta|deal)\s*(?:rp\.?|rupiah)?\s*([\d.,]+)\s*(rb|ribu|k\b)?/)
+    || t.match(/(?:rp\.?|rupiah)\s*([\d.,]+)\s*(rb|ribu|k\b)?/)
+    || t.match(/([\d.,]+)\s*(rb|ribu)\b/)
+    || t.match(/^\s*([\d.,]+)\s*(\/kg|per\s?kg|\bkg\b)?\s*$/);
+  if (!clause) return undefined;
+  let v = Number(clause[1].replace(/\./g, "").replace(/,/g, "."));
+  if (!Number.isFinite(v) || v <= 0) return undefined;
+  if (clause[2] && /rb|ribu|k/.test(clause[2])) v = v * 1000;
+  if (v < 100 || v > 2000000) return undefined;
+  return Math.round(v);
+}
+function fmtRp(n: number): string {
+  return `Rp${Number(n || 0).toLocaleString("id-ID")}`;
+}
+function fmtKg(kg: number): string {
+  const v = Number(kg || 0);
+  if (v >= 1000) {
+    const ton = v / 1000;
+    return `${Number.isInteger(ton) ? String(ton) : ton.toLocaleString("id-ID")} ton`;
+  }
+  return `${v.toLocaleString("id-ID")} kg`;
+}
+function komMatch(a: string, b: string): boolean {
+  const x = String(a || "").toLowerCase().trim();
+  const y = String(b || "").toLowerCase().trim();
+  if (!x || !y) return false;
+  return x.includes(y) || y.includes(x);
+}
+// Kandidat jujur: baris KMD AKTIF/PANEN yang namanya cocok + stok siap > 0.
+function findStockCandidates(komoditas: string): FarmerCommodity[] {
+  return komoditasDb.filter(
+    (k) => (k.status === "AKTIF" || k.status === "PANEN")
+      && komMatch(k.komoditas, komoditas)
+      && Number(k.stokSiapJualTon) > 0,
+  );
+}
+// Alokasi termurah-dulu (maksimalkan selisih untuk kas) + status + spread.
+function evalOffer(o: Offer): { cocokKg: number; overLines: OfferLine[]; waitingPrice: number } {
+  const need = Number(o.qtyKg) || 0;
+  const budget = Number(o.budgetPerKg) || 0;
+  const priced = o.lines
+    .filter((l) => Number(l.hargaPetaniPerKg) > 0)
+    .sort((a, b) => Number(a.hargaPetaniPerKg) - Number(b.hargaPetaniPerKg));
+  const waitingPrice = o.lines.filter((l) => !Number(l.hargaPetaniPerKg)).length;
+  for (const l of o.lines) { l.alokasiKg = 0; l.cocok = false; }
+  let cocokKg = 0;
+  const overLines: OfferLine[] = [];
+  if (budget > 0) {
+    let remaining = need;
+    for (const l of priced) {
+      if (remaining <= 0) break;
+      if (Number(l.hargaPetaniPerKg) > budget) { overLines.push(l); continue; }
+      const take = Math.min(Number(l.stokKg) || 0, remaining);
+      l.alokasiKg = take;
+      l.cocok = take > 0;
+      cocokKg += take;
+      remaining -= take;
+    }
+    o.status = cocokKg >= need ? "COCOK" : cocokKg > 0 ? "SEBAGIAN" : "OPEN";
+    o.spreadTotalRp = priced.reduce(
+      (acc, l) => acc + (Number(l.alokasiKg) || 0) * (budget - Number(l.hargaPetaniPerKg)), 0);
+  } else {
+    o.status = "OPEN";
+    o.spreadTotalRp = 0;
+  }
+  o.updatedAt = new Date().toISOString();
+  return { cocokKg, overLines, waitingPrice };
+}
+function clearOfferAsks(offerId: string): void {
+  let changed = false;
+  for (const u of usersDb) {
+    if (u.pendingAsk && u.pendingAsk.offerId === offerId) {
+      u.pendingAsk = undefined;
+      u.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+  }
+  if (changed) saveUsersToDisk();
+}
+function offerStatusText(o: Offer, viewer: "buyer" | "farmer"): string {
+  const budgetTxt = Number(o.budgetPerKg) > 0 ? fmtRp(Number(o.budgetPerKg)) + "/kg" : "belum diisi";
+  const head = `🤝 *Penawaran ${o.id}* — *${o.status}*\n` +
+    `• Komoditas: *${o.komoditas}* — butuh ${fmtKg(Number(o.qtyKg))}\n` +
+    `• Budget buyer: ${budgetTxt}\n`;
+  const lines = o.lines.length === 0
+    ? "• Petani: (belum ada yang lapor stok)"
+    : "• Petani:\n" + o.lines.map((l) => {
+      const f = farmersDb.find((x) => x.id === l.farmerId);
+      const nm = f ? `${f.nama}${f.kabupaten ? ` (${f.kabupaten})` : ""}` : l.farmerId;
+      const harga = Number(l.hargaPetaniPerKg) > 0 ? fmtRp(Number(l.hargaPetaniPerKg)) + "/kg" : "menunggu harga petani";
+      const alo = Number(l.alokasiKg) > 0 ? ` → alokasi ${fmtKg(Number(l.alokasiKg))}` : "";
+      return `  - ${nm}: siap ${fmtKg(Number(l.stokKg))}, ${harga}${alo}`;
+    }).join("\n");
+  let tail = "";
+  if (o.status === "COCOK" || o.status === "DEAL") {
+    const toFarmers = o.lines.reduce((acc, l) => acc + (Number(l.alokasiKg) || 0) * Number(l.hargaPetaniPerKg || 0), 0);
+    tail = `\n• Total ke petani: ${fmtRp(toFarmers)} | Komisi Hai Tani: ${fmtRp(Number(o.spreadTotalRp) || 0)}`;
+    if (o.status === "DEAL") tail += ` (kas ${o.kasId || "-"})`;
+  }
+  void viewer;
+  return head + lines + tail;
+}
+// DEAL: komisi (selisih) masuk kas + stok petani berkurang sesuai alokasi.
+function finalizeOfferDeal(o: Offer, actorPhone: string): { kasId: string | null; spread: number } {
+  const spread = Math.round(Number(o.spreadTotalRp) || 0);
+  let kasId: string | null = null;
+  if (spread > 0) {
+    const now = new Date().toISOString();
+    const record: CashTransaction = {
+      id: nextId("KAS", cashDb.map((c) => c.id)),
+      farmerId: "",
+      tanggal: now.substring(0, 10),
+      jenis: "MASUK",
+      kategori: "Komisi Negosiasi",
+      jumlahRp: spread,
+      komoditas: sanitizeText(o.komoditas, 60) || undefined,
+      catatan: sanitizeText(
+        `Komisi ${o.id}: buyer ${maskPhone(o.buyerPhone)} <- ${o.lines.filter((l) => Number(l.alokasiKg) > 0).map((l) => l.farmerId).join(", ")}`, 500),
+      dicatatOleh: String(actorPhone || "sistem"),
+      waktuCatat: now,
+      googleSheetRow: nextSheetRow(cashDb.map((c) => c.googleSheetRow), cashDb.length),
+      syncStatus: "synced",
+    };
+    cashDb.unshift(record);
+    saveCashToDisk();
+    kasId = record.id;
+    emitCanonicalEvent({
+      source: "wa-chat", entity: "cash", entityId: record.id,
+      action: "create", actor: actorPhone,
+      payload: { jenis: "MASUK", kategori: "Komisi Negosiasi", jumlahRp: spread, offerId: o.id },
+    });
+  }
+  for (const l of o.lines) {
+    const take = Number(l.alokasiKg) || 0;
+    if (take <= 0) continue;
+    const k = komoditasDb.find((x) => x.id === l.komoditasId);
+    if (k) {
+      k.stokSiapJualTon = Math.max(0, Number(k.stokSiapJualTon || 0) - take / 1000);
+      k.updatedAt = new Date().toISOString();
+      emitCanonicalEvent({
+        source: "wa-chat", entity: "commodity", entityId: k.id,
+        action: "update", actor: actorPhone,
+        payload: { farmerId: k.farmerId, komoditas: k.komoditas, stokSiapJualTon: k.stokSiapJualTon },
+      });
+    }
+  }
+  saveKomoditasToDisk();
+  o.status = "DEAL";
+  o.kasId = kasId || undefined;
+  o.updatedAt = new Date().toISOString();
+  saveOffersToDisk();
+  bumpDataVersion();
+  emitCanonicalEvent({
+    source: "wa-chat", entity: "offer", entityId: o.id,
+    action: "deal", actor: actorPhone,
+    payload: { komoditas: o.komoditas, qtyKg: o.qtyKg, budgetPerKg: o.budgetPerKg, spreadTotalRp: spread, kasId },
+  });
+  return { kasId, spread };
+}
+
+// ============ F6: session-maximizer (sodoran proaktif 1x/hari) ============
+// Memakai sesi 24 jam yang sudah terbuka untuk menanyakan pembaruan harga
+// jual petani (hemat biaya template). Hanya sapaan santai; perintah/draf/
+// negosiasi tak pernah disodori. Jawaban tercatat ke KMD + diteruskan ke
+// penawaran OPEN yang menunggu harga petani yang sama.
+const NUDGE_EVERY_MS = 24 * 60 * 60 * 1000;
+// Perintah/fungsional: pesan seperti ini JANGAN disodori (v1 konservatif).
+const NUDGE_SKIPMSG_RE = /batal|blokir|izinkan|setuju|tidak setuju|daftar|tambah|komoditas|panen selesai|tutup komoditas|butuh|cari|carikan|\bbeli\b|membeli|perlu|nyari|order|pesan|stok|ready|siap|tersedia|harga|jual|tawar|minta|budget|deal|cek penawaran|status penawaran|OFR-|kas\b|catat|terjual|laku|saldo|hpp|rekap|analisis|verifikasi|broadcast|manfaat|benefit|program|hama|penyakit|wereng|ulat|tikus|pupuk|dosis|cuaca|bantuan|help|menu|sama|skip|lewati|stop|berhenti|pengingat|lapor harga|saran|masukan|kritik|usulan|keluhan|komplain|lapor|\d/;
+function pickNudgeTarget(farmerId: string): { kmd: FarmerCommodity; text: string } | null {
+  const rows = komoditasDb.filter((k) => k.farmerId === farmerId && (k.status === "AKTIF" || k.status === "PANEN"));
+  if (rows.length === 0) return null;
+  // Paling basi dulu (hargaMintaAt || createdAt) -> rotasi alami antar komoditas.
+  const sorted = [...rows].sort((a, b) => String(a.hargaMintaAt || a.createdAt || "").localeCompare(String(b.hargaMintaAt || b.createdAt || "")));
+  const kmd = sorted[0];
+  const hasPrice = Number(kmd.hargaMintaPerKg) > 0;
+  const text = hasPrice
+    ? `\n\n💡 *Ngomong-ngomong* — harga jual *${kmd.komoditas}* masih ${fmtRp(Number(kmd.hargaMintaPerKg))}/kg? Balas "sama", angka baru, atau "skip".`
+    : `\n\n💡 *Ngomong-ngomong* — harga jual *${kmd.komoditas}* Bapak/Ibu saat ini berapa per kg? Balas angka saja, mis. "8000". (Atau "skip".)`;
+  return { kmd, text };
+}
+
 // Format success confirmation text
+// Aturan jujur: field yang kosong ditampilkan apa adanya ("Belum diisi") —
+// TIDAK pernah diisi karangan. Estimasi panen ditanyakan susulan bila kosong.
 function formatSuccessFarmerRegistration(newRecord: FarmerRecord, activeAdmin?: AdminUser): string {
+  const varTxt = newRecord.varietas ? ` (${newRecord.varietas})` : "";
+  const locTxt = `${newRecord.alamat}${newRecord.kabupaten && newRecord.kabupaten !== "Belum diketahui" && newRecord.alamat !== newRecord.kabupaten ? ` (${newRecord.kabupaten})` : ""}`;
+  const tonTxt = Number(newRecord.estimasiHasilTon) > 0 ? ` (~*${newRecord.estimasiHasilTon} Ton*)` : "";
+  const panenTxt = `${newRecord.estimasiPanen || "Belum diisi"}${tonTxt}`;
+  const panenAsk = !newRecord.estimasiPanen
+    ? `\n💡 *Info panen belum ada:* boleh dilengkapi kapan saja — ketik mis. "panen Desember 2026" atau "hasil 8 ton".\n`
+    : "";
   if (activeAdmin) {
     return (
-      `✅ *Data Petani Lengkap & Berhasil Ditambahkan ke Google Sheets!*\n\n` +
+      `✅ *Data Petani Lengkap & Berhasil Ditambahkan ke Database!*\n\n` +
       `Bpk/Ibu *${activeAdmin.nama}*, seluruh data pokok telah lengkap dan telah tersimpan di database:\n\n` +
       `• *ID Registrasi:* \`${newRecord.id}\`\n` +
       `• *Nama Petani:* *${newRecord.nama}*\n` +
-      `• *Komoditas:* *${newRecord.komoditas}* (${newRecord.varietas})\n` +
+      `• *Komoditas:* *${newRecord.komoditas}*${varTxt}\n` +
       `• *Luas Lahan:* *${newRecord.luasLahanFormatted}*\n` +
-      `• *Lokasi:* ${newRecord.alamat} (${newRecord.kabupaten})\n` +
-      `• *Estimasi Panen:* ${newRecord.estimasiPanen} (~*${newRecord.estimasiHasilTon} Ton*)\n` +
-      `• *Status Verifikasi:* 🟢 *${newRecord.statusVerifikasi}* (Otoritas ${activeAdmin.role})\n` +
-      `• *Baris Google Sheets:* Baris #${newRecord.googleSheetRow}\n\n` +
-      `Data telah otomatis tersimpan dan dapat dilihat langsung di tab *Dashboard* dan *Google Sheets*.`
+      `• *Lokasi:* ${locTxt}\n` +
+      `• *Estimasi Panen:* ${panenTxt}\n` +
+      panenAsk +
+      `• *Status Verifikasi:* 🟢 *${newRecord.statusVerifikasi}* (Otoritas ${activeAdmin.role})\n\n` +
+      `Data telah otomatis tersimpan dan dapat dilihat langsung di tab *Dashboard*.`
     );
   }
   return (
-    `✅ *Data Petani Lengkap & Berhasil Ditambahkan ke Google Sheets!*\n\n` +
+    `✅ *Data Petani Lengkap & Berhasil Ditambahkan ke Database!*\n\n` +
     `Data pendaftaran lahan telah lengkap dan berhasil disimpan ke database resmi:\n\n` +
     `• *ID Registrasi:* \`${newRecord.id}\`\n` +
     `• *Nama Petani:* *${newRecord.nama}*\n` +
-    `• *Komoditas:* *${newRecord.komoditas}* (${newRecord.varietas})\n` +
+    `• *Komoditas:* *${newRecord.komoditas}*${varTxt}\n` +
     `• *Luas Lahan:* *${newRecord.luasLahanFormatted}*\n` +
-    `• *Lokasi:* ${newRecord.alamat} (${newRecord.kabupaten})\n` +
-    `• *Estimasi Panen:* ${newRecord.estimasiPanen} (~*${newRecord.estimasiHasilTon} Ton*)\n` +
-    `• *Status Verifikasi:* 🟢 *${newRecord.statusVerifikasi}*\n` +
-    `• *Baris Google Sheets:* Baris #${newRecord.googleSheetRow}\n\n` +
-    `Data sudah dapat dilihat di tab Dashboard dan Google Sheets secara real-time!`
+    `• *Lokasi:* ${locTxt}\n` +
+    `• *Estimasi Panen:* ${panenTxt}\n` +
+    panenAsk +
+    `• *Status Verifikasi:* 🟢 *${newRecord.statusVerifikasi}*\n\n` +
+    `Data sudah dapat dilihat di tab Dashboard.`
   );
 }
 
@@ -1062,7 +1985,7 @@ function extractSupplierFromText(
   } else if (lower.includes("alsintan") || lower.includes("traktor") || lower.includes("sprayer") || lower.includes("mesin")) {
     ext.kategori = "Alat & Mesin Pertanian (Alsintan)";
   } else if (lower.includes("pengepul") || lower.includes("offtaker") || lower.includes("tengkulak") || lower.includes("tampung") || lower.includes("serap") || lower.includes("giling") || lower.includes("beras")) {
-    ext.kategori = "Offtaker & Pengepul";
+    ext.kategori = "Buyer & Offtaker";
   } else if (lower.includes("koperasi") || lower.includes("poktan") || lower.includes("gapoktan")) {
     ext.kategori = "Koperasi Tani";
   }
@@ -1270,7 +2193,7 @@ function formatIncompleteSupplierPrompt(
   const quickReplies = [
     "Kategori: Pupuk & Saprodi",
     "Kategori: Bibit & Benih",
-    "Kategori: Offtaker & Pengepul",
+    "Kategori: Buyer & Offtaker",
     "Lokasi: Subang",
   ];
 
@@ -1325,6 +2248,17 @@ function generateSmartAdminFallback(
       const incompleteNoHp = formatIncompleteFarmerPrompt(merged, activeAdmin.nama, true);
       incompleteNoHp.reply += "\n\n➕ *Admin: cantumkan juga No HP/WA petani* (misal: 0812xxxxxxx).";
       return { ...incompleteNoHp, isAdminAction: true };
+    }
+    // Gerbang duplikat: nomor sama -> tanya Ya/Tidak (aturan user).
+    const dupAdmFb = findDuplicateFarmerByPhone(merged, activeAdmin, activeAdmin.noHp);
+    if (dupAdmFb) {
+      return {
+        reply: formatDuplicateAskPrompt(dupAdmFb, merged),
+        extracted: { ...merged, _pendingUpdate: dupAdmFb.id },
+        isComplete: false,
+        isAdminAction: true,
+        quickReplies: ["Ya, update", "Tidak"],
+      };
     }
     const newRecord = saveFarmerRecord(merged, activeAdmin, activeAdmin.noHp);
     return {
@@ -1568,6 +2502,13 @@ let currentDataVersion = 1;
 let totalTokensSavedEstimate = 0;
 let totalCacheHits = 0;
 
+// Mutu cache: jangan simpan balasan stub/terpotong (pendek atau berakhir
+// ":" / "…" / "...") agar racun tak disajikan berulang (kasus 26a, 31 Okt 2026).
+function isCacheWorthyReply(reply: unknown): boolean {
+  const t = String(reply || "").trim();
+  if (t.length < 40) return false;
+  return !/[:…]\s*$/.test(t) && !/\.\.\.\s*$/.test(t);
+}
 function bumpDataVersion() {
   currentDataVersion++;
   // ponytail: clear ganti LRU saat cache besar.
@@ -1710,6 +2651,7 @@ async function transcribeAudioBuffer(buf: Buffer, mime: string): Promise<{ trans
   if (!ai) throw new Error("kunci AI belum valid");
   const prompt = `Dengarkan rekaman audio suara ini dari seorang petani atau petugas pertanian di Indonesia.
 Lakukan:
+0. ANTI-KARANGAN: jika audio TIDAK berisi ucapan manusia yang jelas (hening, nada/beep, derau, musik), isi "transcription" dengan string KOSONG dan semua "extracted" null. JANGAN PERNAH mengarang ucapan/nama/data dari suara non-ujaran.
 1. Transkripsikan apa yang diucapkan secara verbatim dan akurat ke dalam teks bahasa Indonesia.
 2. Analisis dan ekstrak data petani jika ada:
    - nama: nama petani (misal: "Pak Suparman", "Pak Ahmad", "Ibu Siti")
@@ -1735,19 +2677,16 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
     "estimasiPanen": null
   }
 }`;
-  const response = await ai.models.generateContent({
-    model: MEDIA_VISION_MODEL,
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { inlineData: { mimeType: mime || "audio/webm", data: buf.toString("base64") } },
-          { text: prompt },
-        ],
-      },
-    ],
-  });
-  const responseText = stripCodeFences((response as any).text || "");
+  const contents = [
+    {
+      role: "user",
+      parts: [
+        { inlineData: { mimeType: mime || "audio/webm", data: buf.toString("base64") } },
+        { text: prompt },
+      ],
+    },
+  ];
+  const responseText = stripCodeFences(await generateMediaWithFallback(ai, contents));
   let parsed: any = {};
   try {
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -1759,7 +2698,7 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
   const ruleBased = extractFarmerFromText(parsed.transcription || "", {});
   return {
     transcription: parsed.transcription || "",
-    extracted: { ...(parsed.extracted || {}), ...(ruleBased.extracted || {}) },
+    extracted: { ...scrubUnmentionedEstimates(parsed.extracted, parsed.transcription || ""), ...(ruleBased.extracted || {}) },
   };
 }
 async function analyzeImageBuffer(buf: Buffer, mime: string, caption = ""): Promise<string> {
@@ -1771,20 +2710,49 @@ Deskripsikan foto ini singkat (maksimal 5 baris/bullet):
 1. Apa isi foto (tanaman/hewan/lahan/dokumen/lainnya)?
 2. Jika tanaman: kemungkinan komoditas + gejala hama/penyakit/kekurangan unsur yang terlihat (atau "tampak sehat" bila tak ada gejala jelas).
 3. Satu saran tindak lanjut paling relevan (atau pertanyaan klarifikasi bila foto tak jelas).
+ANTI-KARANGAN: jika foto kosong/tidak terbaca (hitam total, 1 piksel, buram total), katakan terus-terang fotonya tidak bisa dibaca dan JANGAN mengarang isi — abaikan caption bila visual tak mendukung. Jangan pernah membuat estimasi panen/tonase/waktu dari foto.
 ${cap ? `Konteks dari pengirim: "${cap}"\n` : ""}Jawab bahasa Indonesia santai-profesional, format WhatsApp (*bold*, bullet •). Tanpa pagar kode.`;
-  const response = await ai.models.generateContent({
-    model: MEDIA_VISION_MODEL,
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { inlineData: { mimeType: mime || "image/jpeg", data: buf.toString("base64") } },
-          { text: prompt },
-        ],
-      },
-    ],
-  });
-  return stripCodeFences((response as any).text || "").trim();
+  const contents = [
+    {
+      role: "user",
+      parts: [
+        { inlineData: { mimeType: mime || "image/jpeg", data: buf.toString("base64") } },
+        { text: prompt },
+      ],
+    },
+  ];
+  return stripCodeFences(await generateMediaWithFallback(ai, contents)).trim();
+}
+
+// Media (voice+vision) memakai rantai model yang sama dengan teks: bila model
+// utama 503/penuh, coba berikutnya. Tanpa ini 1 model down = seluruh media mati.
+async function generateMediaWithFallback(ai: any, contents: any): Promise<string> {
+  const models = ["gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-3.8-flash"];
+  let lastErr: any = null;
+  for (const model of models) {
+    try {
+      const response: any = await ai.models.generateContent({
+        model,
+        contents,
+        config: { abortSignal: AbortSignal.timeout(25000) },
+      });
+      let text = "";
+      try {
+        const parts = response?.candidates?.[0]?.content?.parts;
+        if (Array.isArray(parts)) text = parts.map((p: any) => (typeof p?.text === "string" ? p.text : "")).join("");
+      } catch {}
+      if (!text && typeof response?.text === "string") text = response.text;
+      if (text) {
+        console.log(`[Gemini Media] model=${model} chars=${text.length}`);
+        return text;
+      }
+      lastErr = new Error(`Respons kosong dari ${model}`);
+    } catch (err: any) {
+      lastErr = err;
+      console.log(`[Gemini Media] Model ${model} fallback triggered (${err?.status || err?.message || err}), trying next...`);
+    }
+  }
+  throw lastErr || new Error("All Gemini media models failed");
 }
 
 // Predikat intent bersama (satu-satunya sumber kebenaran; dipakai router + cabang).
@@ -1888,6 +2856,9 @@ const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 function rateLimit(max: number, windowMs: number) {
   return (req: any, res: any, next: any) => {
     const ip = (req.ip || req.headers["x-forwarded-for"] || "local") as string;
+    // Loopback bebas (tes lokal/health/dashboard mesin sendiri); trafik WA
+    // produksi datang dari IP remote forwarder sehingga tetap dibatasi.
+    if (ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1") return next();
     const key = `${ip}:${req.path}`;
     const now = Date.now();
     if (rateBuckets.size > 1000) for (const [k, v] of rateBuckets) if (now > v.resetAt) rateBuckets.delete(k);
@@ -1940,6 +2911,9 @@ function emitCanonicalEvent(e: {
     });
     if (eventsDb.length > 5000) eventsDb.length = 5000;
     writeJsonAtomic(`${DATA_DIR}/events_db.json`, eventsDb, "events_db.json");
+    // Cermin Sheets write-behind: antrean <1ms, worker background yang mengirim.
+    const sk = { farmer: "farmer", supplier: "supplier", cash: "cash", stock: "stock", commodity: "commodity", feedback: "feedback" }[(e.entity || "").toLowerCase()];
+    if (sk) enqueueSheetSync(sk as "farmer" | "supplier" | "cash" | "stock" | "commodity", e.entityId);
   } catch (err) {
     console.error("[Events] gagal menulis event kanonis:", err);
   }
@@ -1958,16 +2932,49 @@ function cleanHost(h: unknown, fb = "localhost:3000"): string {
 }
 const ADD_WORDS = ["tambah", "daftarkan", "daftar", "input", "masukkan", "catat", "simpan"];
 function isAddRegex(lower: string): boolean {
-  for (const w of ADD_WORDS) if ((lower || "").includes(w)) return true;
+  const l = lower || "";
+  // Frasa pasif/tanya BUKAN aksi daftar: "terdaftar?", "pendaftaran", "daftar sebagai apa".
+  // ("mendaftarkan" tetap aksi: tidak mengandung penanda pasif.)
+  if (/terdaftar|pendaftaran|daftar sebagai/.test(l)) return false;
+  for (const w of ADD_WORDS) if (l.includes(w)) return true;
   return false;
+}
+// Pertanyaan/permintaan yang butuh penalaran atau penjelasan (bukan aksi data
+// murni): ditempuh LLM, bukan templat deterministik. Dipakai bersama bypass,
+// guard templat-draf admin+petani, dan guard fallback.
+// Catatan: "simpan" SENGAJA tidak ada di sini (itu aksi tulis data).
+function needsReasoningMsg(message: string): boolean {
+  const lower = String(message || "").toLowerCase();
+  if (lower.includes("?")) return true;
+  return /analisis|rekomendasi|prediksi|kenapa|mengapa|bagaimana|\bkapan\b|apakah|jelaskan|bandingkan|\bapa\b|siapa|dimana|di mana|manfaat|benefit|keuntungan|kegunaan|tentang|program|tolong|bantu/.test(lower);
 }
 // Data/pendaftaran petani murni lebih cepat + tepat via jalur deterministik
 // (<100ms) daripada LLM (~2-9 dtk). Pesan yang butuh penalaran (analisis,
 // rekomendasi, tanya) tetap ke LLM; ekstraksi data ditempel terpisah.
 function isDeterministicFarmerData(message: string, regHasMin: boolean): boolean {
   const lower = String(message || "").toLowerCase();
-  const needsReasoning = /analisis|rekomendasi|prediksi|kenapa|mengapa|bagaimana|kapan|apakah|jelaskan|bandingkan|\?/.test(lower);
-  return (isAddRegex(lower) || regHasMin) && !needsReasoning;
+  return (isAddRegex(lower) || regHasMin) && !needsReasoningMsg(message);
+}
+// Anti-karangan estimasi (aturan user): nilai estimasiPanen/estimasiHasilTon
+// dari LLM hanya dipakai bila ada buktinya di teks user (nama bulan/tahun
+// untuk panen; angka+satuan untuk tonase). Draf yang sudah ada tak tersentuh.
+function scrubUnmentionedEstimates(parsedExt: any, evidenceText: string): any {
+  const ext = { ...(parsedExt || {}) };
+  const lower = String(evidenceText || "").toLowerCase();
+  const hasMonth = /januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|20\d\d|bulan\s+(depan|ini)|minggu\s+depan|tahun\s+depan/.test(lower);
+  if (ext.estimasiPanen && !hasMonth) delete ext.estimasiPanen;
+  const hasTon = /\d+(?:[.,]\d+)?\s*(?:ton|kuintal|kwintal|kg)\b/.test(lower);
+  if (ext.estimasiHasilTon !== undefined && ext.estimasiHasilTon !== null && !hasTon) delete ext.estimasiHasilTon;
+  // Lokasi/nama dari LLM wajib berjejak di teks (per token signifikan); jika
+  // tidak, buang (anti-confabulation "Subang"). Komoditas/noHp dikecualikan
+  // karena kanonisasi ("cabe"->"Cabai…") & format nomor yang sah.
+  for (const k of ["kabupaten", "alamat", "nama"]) {
+    const v = String((ext as any)[k] || "").trim();
+    if (!v || v.toLowerCase() === "null") { delete (ext as any)[k]; continue; }
+    const toks = v.toLowerCase().split(/[^a-z]+/).filter((t) => t.length > 3);
+    if (toks.length > 0 && !toks.some((t) => lower.includes(t))) delete (ext as any)[k];
+  }
+  return ext;
 }
 
 // ---------- ERP Chat: deteksi intent (regex dulu, Laya saat miss) ----------
@@ -2545,7 +3552,7 @@ ${kabFarmers.slice(0, 5).map((f) => `• ${f.nama} | ${f.komoditas} ${f.luasLaha
     const matchedFarmers = farmersDb.filter((f) => (f.komoditas || "").toLowerCase().includes(cropName.toLowerCase()));
     const matchedCom = commoditiesDb.find((c) => c.nama.toLowerCase().includes(cropName.toLowerCase()));
     targetedDetails = `DATA SPESIFIK KOMODITAS ${cropName.toUpperCase()}:
-${matchedCom ? `• Harga Pasar: Rp ${matchedCom.hargaSekarang.toLocaleString("id-ID")}/kg (${matchedCom.statusAnomali}, ${matchedCom.perubahanPersen > 0 ? "+" : ""}${matchedCom.perubahanPersen}%)` : ""}
+${matchedCom ? `• Harga live TIDAK ada di konteks (data seed basi) — JANGAN sebut angka; arahkan user: "cek harga ${cropName}".` : ""}
 • Petani Terdata (${matchedFarmers.length} orang):
 ${matchedFarmers.slice(0, 5).map((f) => `• ${f.nama} (${f.kabupaten || f.alamat}, ${f.luasLahan} Ha, est. ${f.estimasiHasilTon} Ton, panen ${f.estimasiPanen})`).join("\n")}`;
   } else if (mentionsAll && isAdmin) {
@@ -2555,14 +3562,19 @@ ${farmersDb.slice(0, 8).map((f) => `• ${f.nama} | ${f.komoditas} ${f.luasLahan
 ${farmersDb.length > 8 ? `...dan ${farmersDb.length - 8} petani lainnya tercatat di Google Sheets.` : ""}`;
   }
 
+  // ANTI-BASI: seed commoditiesDb berumur hari/minggu — angka Rp & status trennya
+  // PERNAH dikutip LLM sebagai "hari ini" (kasus Rp78.500). Konteks hanya bawa
+  // NAMA komoditas; angka pasti selalu via jalur harga live. Aturan prompt no.4
+  // di kedua system prompt adalah backstop kedua.
   let marketHighlight = "";
   if (lower.includes("harga") || lower.includes("pasar") || mentionsCabai || mentionsPadi || mentionsBawang || mentionsJagung) {
-    marketHighlight = `DATA HARGA PASAR HARI INI:
-${commoditiesDb.map((c) => `• ${c.nama}: Rp ${c.hargaSekarang.toLocaleString("id-ID")}/kg (${c.statusAnomali})`).join("\n")}`;
+    marketHighlight = `KOMODITAS PANTAUAN PASAR (nama saja — angka & tren di konteks ini BASI, JANGAN dikutip):
+${commoditiesDb.map((c) => `• ${c.nama}`).join("\n")}
+Angka rupiah pasti HANYA dari jawaban "cek harga <komoditas>" (jalur live).`;
   } else {
     const anomalies = commoditiesDb.filter((c) => c.statusAnomali !== "NORMAL");
     if (anomalies.length > 0) {
-      marketHighlight = `STATUS PASAR: ${anomalies.map((a) => `${a.nama} (Rp ${a.hargaSekarang.toLocaleString("id-ID")}/kg, ${a.statusAnomali})`).join(", ")}`;
+      marketHighlight = `KOMODITAS PANTAUAN: ${anomalies.map((a) => a.nama).join(", ")}. Angka & status tren terkini TIDAK tersedia di konteks ini — JANGAN dikarang; arahkan user bertanya "cek harga <komoditas>".`;
     }
   }
 
@@ -2658,6 +3670,79 @@ async function callNineRouterChat(
       throw new Error("Respon 9Router kosong atau tidak memiliki format choices[0].message.content");
     }
     return content;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ==========================================
+// NVIDIA NIM Provider (OpenAI-compatible /v1/chat/completions)
+// Default: z-ai/glm-5.3-flash (gratis s.d. 40 RPM, multimodal teks+gambar).
+// Cadangan utama Gemini; gagal -> 9Router -> Gemini -> rule_based.
+// ==========================================
+function getNimConfig() {
+  let url = process.env.NVIDIA_NIM_URL?.trim() || "https://integrate.api.nvidia.com/v1";
+  const key = process.env.NVIDIA_NIM_KEY?.trim() || "";
+  const model = process.env.NVIDIA_NIM_MODEL?.trim() || "z-ai/glm-5.3-flash";
+  url = url.replace(/\/+$/, "");
+  if (!url.endsWith("/v1")) {
+    url = `${url}/v1`;
+  }
+  const isConfigured = Boolean(key && key.length > 10);
+  return { url, key, model, isConfigured };
+}
+
+async function callNimChat(
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  modelOverride?: string,
+  options?: { signal?: AbortSignal; maxTokens?: number; timeoutMs?: number }
+): Promise<string> {
+  const cfg = getNimConfig();
+  if (!cfg.isConfigured) {
+    throw new Error("NVIDIA NIM belum dikonfigurasi (NVIDIA_NIM_KEY kosong)");
+  }
+  const model = modelOverride || cfg.model;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(1000, options?.timeoutMs || 7000));
+  if (options?.signal) {
+    if (options.signal.aborted) {
+      clearTimeout(timeout);
+      controller.abort();
+    }
+    options.signal.addEventListener("abort", () => {
+      clearTimeout(timeout);
+      controller.abort();
+    });
+  }
+  try {
+    const res = await fetch(`${cfg.url}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${cfg.key}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.2,
+        max_tokens: options?.maxTokens || 550,
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`NIM error ${res.status}: ${errText.substring(0, 200)}`);
+    }
+    const data: any = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    // Model reasoning: konten bisa array parts -> gabung teksnya.
+    const text = typeof content === "string" ? content : Array.isArray(content)
+      ? content.map((p: any) => (typeof p === "string" ? p : p?.text || "")).join("")
+      : "";
+    if (!text) {
+      throw new Error("Respon NIM kosong atau tanpa choices[0].message.content");
+    }
+    return text;
   } finally {
     clearTimeout(timeout);
   }
@@ -2833,19 +3918,64 @@ async function callGeminiGenerate(
 }
 
 // Universal AI Caller with Priority Chain, Cancellation Support & Token Guarding
+// ---- F5: ack cepat untuk query berat (anti-abort forwarder 8 dtk) ----
+// WA berpacu dengan LLM: bila > ACK_AFTER_MS, balas ack sekarang + jawaban
+// asli susulan via sendWaText langsung (masih dalam sesi 24 jam user).
+// 7000: jawaban terstruktur LLM p50 ~5-6 dtk; 1 dtk margin ke budget 8 dtk.
+const ACK_AFTER_MS = Math.max(1000, Number(process.env.ACK_AFTER_MS || "7000") || 7000);
+const ACK_BG_CAP_MS = Math.max(15000, Number(process.env.ACK_BG_CAP_MS || "45000") || 45000);
+const ACK_TEXT = "⏳ Mohon izin memproses pertanyaan Anda, mohon tunggu sebentar. Jawabannya akan saya kirim segera setelah siap.";
+const ACK_UNKNOWN = "Maaf, saya belum mengetahui hal ini. Terima kasih, ini akan menjadi bahan pengembangan Hai Tani.";
+function extractAckReplyText(text: string): string {
+  const t = stripCodeFences(String(text || "")).trim();
+  const m = t.match(/\{[\s\S]*\}/);
+  if (m) {
+    try {
+      const j = JSON.parse(m[0]);
+      if (typeof j.reply === "string" && j.reply.trim()) return j.reply.trim().slice(0, 3500);
+    } catch { /* jatuh ke teks mentah */ }
+  }
+  return t.slice(0, 3500);
+}
+// Susulan ack: kirim jawaban asli (v1 answer-only, tanpa simpan draf/registrasi).
+function deliverAckFollowup(kind: "admin" | "petani", phone: string, question: string, p: Promise<{ text: string; provider: string; model: string }>): void {
+  const t0 = Date.now();
+  p.then(
+    async (r) => {
+      const extracted = extractAckReplyText(r.text);
+      if (!extracted) { try { logFeedback(phone, "TIDAK_TAHU", question, "ack-followup kosong"); } catch {} }
+      else if (extracted.includes("belum mengetahui hal ini")) { try { logFeedback(phone, "TIDAK_TAHU", question, "ack-followup jujur"); } catch {} }
+      const reply = extracted || ACK_UNKNOWN;
+      const sent = await sendWaText(phone, reply).catch((e) => ({ to: phone, ok: false as const, error: String(e).slice(0, 200) }));
+      console.log(`[Ack] susulan ${kind} ${maskPhone(phone)} ${sent.ok ? "TERKIRIM" : "GAGAL " + (sent.error || "")} ${Date.now() - t0}ms`);
+      try {
+        trainingLog({ kind: "chat", channel: "wa", role: kind === "admin" ? "admin" : "petani", phoneHash: hashPhone(phone), in: clipText(`[ack-susulan] ${question}`), out: clipText(reply), provider: String(r.provider || ""), model: String(r.model || ""), ms: Date.now() - t0, intent: "ack_followup" });
+      } catch { /* statistik saja */ }
+      emitCanonicalEvent({ source: "wa-chat", entity: "ack", entityId: `ack-${Date.now().toString(36)}`, action: "followup", actor: phone, payload: { kind, ok: sent.ok } });
+    },
+    async (e) => {
+      try { logFeedback(phone, "TIDAK_TAHU", question, "ack-followup gagal-LLM"); } catch {}
+      const sent = await sendWaText(phone, ACK_UNKNOWN).catch((er) => ({ to: phone, ok: false as const, error: String(er).slice(0, 200) }));
+      console.log(`[Ack] susulan ${kind} ${maskPhone(phone)} gagal-LLM (${String((e as any)?.message || e).slice(0, 80)}) kirim-jujur:${sent.ok ? "OK" : "GAGAL"}`);
+      emitCanonicalEvent({ source: "wa-chat", entity: "ack", entityId: `ack-${Date.now().toString(36)}`, action: "followup_fail", actor: phone, payload: { kind, error: String((e as any)?.message || e).slice(0, 120) } });
+    },
+  );
+}
 async function callUniversalAI(
   systemPrompt: string,
   userPrompt: string,
   history?: Array<{ sender: string; text: string }>,
   options?: { signal?: AbortSignal; maxOutputTokens?: number; timeoutMs?: number }
-): Promise<{ text: string; provider: "9router" | "gemini" | "meta"; model: string }> {
+): Promise<{ text: string; provider: "9router" | "gemini" | "meta" | "nim"; model: string }> {
   if (options?.signal?.aborted) {
     throw new Error("Operasi dibatalkan sebelum pengiriman (hemat token)");
   }
 
   const metaCfg = getMetaModelConfig();
+  const nimCfg = getNimConfig();
   const nineRouterCfg = getNineRouterConfig();
   let nineRouterErr: any = null;
+  let nimErr: any = null;
   let metaErr: any = null;
 
   // Compact conversation history: keep only last 2-3 exchanges, trim length
@@ -2856,7 +3986,7 @@ async function callUniversalAI(
       text: (h.text || "").length > 200 ? (h.text || "").slice(0, 200) + "..." : h.text,
     }));
 
-  // Bangun messages OpenAI-compatible sekali; dipakai Meta Model API & 9Router
+  // Bangun messages OpenAI-compatible sekali; dipakai Meta, NIM & 9Router
   const chatMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
   if (systemPrompt) {
     chatMessages.push({ role: "system", content: systemPrompt });
@@ -2887,7 +4017,26 @@ async function callUniversalAI(
     }
   }
 
-  // 2. Coba 9Router jika NINEROUTER_URL dikonfigurasi
+  // 2. NVIDIA NIM (GLM) bila dikonfigurasi — cadangan utama saat Gemini gangguan.
+  // Batas 6 dtk: NIM yang hang (0 byte, kasus 31 Okt 2026) harus gagal-cepat
+  // ke Gemini, bukan menahan rantai.
+  if (nimCfg.isConfigured) {
+    try {
+      const text = await callNimChat(chatMessages, undefined, {
+        signal: options?.signal,
+        maxTokens: options?.maxOutputTokens || 550,
+        timeoutMs: Math.min(options?.timeoutMs || 7000, 6000),
+      });
+      console.log(`[AI Dispatcher] Balasan via NVIDIA NIM (${nimCfg.model})`);
+      return { text, provider: "nim", model: nimCfg.model };
+    } catch (err: any) {
+      if (options?.signal?.aborted) throw err;
+      nimErr = err;
+      console.warn(`[NIM Warning] Pemanggilan NIM gagal (${err.message}). Beralih ke 9Router...`);
+    }
+  }
+
+  // 3. Coba 9Router jika NINEROUTER_URL dikonfigurasi
   if (nineRouterCfg.isConfigured) {
     try {
       const text = await callNineRouterChat(chatMessages, undefined, {
@@ -2903,7 +4052,7 @@ async function callUniversalAI(
     }
   }
 
-  // 3. Fallback ke Google Gemini API
+  // 4. Fallback ke Google Gemini API
   const ai = getGemini();
   if (ai) {
     const historyFormatted = compactHistory
@@ -2932,9 +4081,9 @@ async function callUniversalAI(
   }
 
   throw new Error(
-    metaErr || nineRouterErr
-      ? `AI gagal (Meta: ${metaErr?.message || "tidak dicoba"}; 9Router: ${nineRouterCfg.url || nineRouterCfg.key ? nineRouterErr?.message || "tidak dicoba" : "tidak dikonfigurasi"}; Gemini: ${getGemini() ? "gagal" : "tidak tersedia"})`
-      : "Tidak ada provider AI yang aktif (META_MODEL_KEY, NINEROUTER_URL, atau GEMINI_API_KEY belum diisi)"
+    metaErr || nimErr || nineRouterErr
+      ? `AI gagal (Meta: ${metaErr?.message || "tidak dicoba"}; NIM: ${nimCfg.isConfigured ? nimErr?.message || "tidak dicoba" : "tidak dikonfigurasi"}; 9Router: ${nineRouterCfg.url || nineRouterCfg.key ? nineRouterErr?.message || "tidak dicoba" : "tidak dikonfigurasi"}; Gemini: ${getGemini() ? "gagal" : "tidak tersedia"})`
+      : "Tidak ada provider AI yang aktif (META_MODEL_KEY, NVIDIA_NIM_KEY, NINEROUTER_URL, atau GEMINI_API_KEY belum diisi)"
   );
 }
 
@@ -3270,8 +4419,8 @@ function processHppGenerate(data: any): { status: number; body: any } {
 export function createServerApp() {
   const app = express();
   const json1mb = express.json({ limit: "1mb", verify: (req: any, _res: any, buf: Buffer) => { if (req.url?.startsWith("/api/webhook/whatsapp")) req.rawBody = buf; } });
-  // /api/wa-media membawa base64 media (s.d. ~5MB) -> parser 6MB khusus rute itu.
-  app.use("/api/wa-media", express.json({ limit: "6mb" }));
+  // /api/wa-media membawa base64 media (+33% overhead, media s.d. 5MB) -> parser 8MB khusus rute itu.
+  app.use("/api/wa-media", express.json({ limit: "8mb" }));
   app.use((req, res, next) => ((req.url || "").startsWith("/api/wa-media") ? next() : json1mb(req, res, next)));
   // ponytail: header minimal tanpa dep; tambah helmet saat production.
   app.use((_req, res, next) => {
@@ -3304,6 +4453,10 @@ export function createServerApp() {
       meta: {
         configured: getMetaModelConfig().isConfigured,
         model: getMetaModelConfig().model,
+      },
+      nim: {
+        configured: getNimConfig().isConfigured,
+        model: getNimConfig().model,
       },
       laya: { url: LAYA_URL, down: Date.now() < layaUnavailableUntil },
     });
@@ -3488,6 +4641,15 @@ export function createServerApp() {
     return { ok: true };
   }
 
+  // F1: tambah/cabut ADMIN hanya oleh SUPER_ADMIN (nomor Setiawan kanonis).
+  function requireSuperAdmin(body: any): { ok: boolean; error?: string } {
+    const req = findAdmin(body?.requesterNoHp);
+    if (!req || !req.aktif || req.role !== "SUPER_ADMIN") {
+      return { ok: false, error: "Hanya SUPER_ADMIN yang boleh menambah/mencabut admin." };
+    }
+    return { ok: true };
+  }
+
   // Identitas pengirim tulis: requesterNoHp (operator dashboard) atau senderPhone (chat/WA).
   function requesterIdentity(body: any): string {
     return String(body?.requesterNoHp || body?.senderPhone || "");
@@ -3517,7 +4679,7 @@ export function createServerApp() {
     if (anyHash) {
       const s = readSession(req);
       const me = s ? adminsDb.find((a) => a.id === s.adminId) : undefined;
-      if (!me || !me.aktif || me.role !== "ADMIN_UTAMA") {
+      if (!me || !me.aktif || (me.role !== "ADMIN_UTAMA" && me.role !== "SUPER_ADMIN")) {
         return res.status(403).json({ error: "Hanya Admin Utama bersesi boleh mereset password." });
       }
     } else if (!requireRequesterAdmin(req.body).ok) {
@@ -3562,9 +4724,12 @@ export function createServerApp() {
     if (!nama || !noHp) {
       return res.status(400).json({ error: "Nama dan nomor WhatsApp wajib diisi." });
     }
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireSuperAdmin(req.body);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
+    }
+    if (String(role || "").toUpperCase() === "SUPER_ADMIN") {
+      return res.status(403).json({ error: "SUPER_ADMIN hanya via migrasi server (env SUPER_ADMIN_PHONE)." });
     }
 
     const existing = findAdmin(noHp);
@@ -3582,6 +4747,7 @@ export function createServerApp() {
       aktif: true,
       waktuTerdaftar: new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" }),
       didaftarkanOleh: req.body?.requesterNoHp ? String(req.body.requesterNoHp).trim() : undefined,
+      appointedBy: req.body?.requesterNoHp ? String(req.body.requesterNoHp).trim() : undefined,
     };
 
     adminsDb.push(newAdmin);
@@ -3596,7 +4762,11 @@ export function createServerApp() {
     if (id === "ADM-001") {
       return res.status(403).json({ error: "Super Admin utama tidak dapat dihapus." });
     }
-    const gate = requireRequesterAdmin(req.body);
+    const target = adminsDb.find((a) => a.id === id);
+    if (target && target.role === "SUPER_ADMIN") {
+      return res.status(403).json({ error: "Akun SUPER_ADMIN tidak dapat dihapus via API." });
+    }
+    const gate = requireSuperAdmin(req.body);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -3978,9 +5148,9 @@ export function createServerApp() {
   }, async (req, res) => {
     const t0m = Date.now();
     try {
-      const { kind, base64, mimeType, senderPhone, waId, caption } = req.body || {};
-      if (kind !== "voice" && kind !== "image") {
-        return res.status(400).json({ error: "kind harus voice|image" });
+      const { kind, base64, mimeType, senderPhone, waId, caption, filename } = req.body || {};
+      if (kind !== "voice" && kind !== "image" && kind !== "document") {
+        return res.status(400).json({ error: "kind harus voice|image|document" });
       }
       if (!base64 || typeof base64 !== "string") {
         return res.status(400).json({ error: "base64 is required" });
@@ -4012,17 +5182,21 @@ export function createServerApp() {
           });
         }
         const transcript = (tr.transcription || "").trim();
-        trainingLog({
-          ...mBase, transcript: clipText(transcript),
-          extractedKeys: Object.keys(tr.extracted || {}), ok: true, ms: Date.now() - t0m,
-        });
         if (!transcript) {
+          trainingLog({
+            ...mBase, transcript: "",
+            extractedKeys: Object.keys(tr.extracted || {}), ok: false, error: "transkripsi kosong", ms: Date.now() - t0m,
+          });
           return res.json({
-            ok: true, kind, transcription: "", savedMedia: mediaPath,
+            ok: false, kind, transcription: "", savedMedia: mediaPath,
             reply: "🎙️ Voice note diterima tapi tidak terdengar jelas. Coba kirim ulang dengan suara lebih jelas, atau ketik pesan teks.",
             aiProvider: "rule_based", ms: Date.now() - t0m,
           });
         }
+        trainingLog({
+          ...mBase, transcript: clipText(transcript),
+          extractedKeys: Object.keys(tr.extracted || {}), ok: true, ms: Date.now() - t0m,
+        });
         // Teruskan transkrip ke mesin chat via self-call (jawab seperti pesan teks).
         try {
           const port = String(process.env.PORT || "3000");
@@ -4050,6 +5224,50 @@ export function createServerApp() {
           });
         }
       }
+      // F8: kind === "document" (nota/katalog/laporan PDF/DOCX/XLSX/CSV/TXT).
+      if (kind === "document") {
+        const namaFile = String(filename || "dokumen");
+        let parsed: { text: string; tipe: string };
+        try {
+          parsed = await parseDocumentBuffer(buf, String(mimeType || ""), namaFile);
+        } catch (err: any) {
+          const msg = String(err?.message || "");
+          trainingLog({ ...mBase, filename: namaFile.slice(0, 200), ok: false, error: clipText(msg || "gagal", 200), ms: Date.now() - t0m });
+          return res.json({
+            ok: false, kind, savedMedia: mediaPath,
+            reply: /belum didukung/.test(msg)
+              ? `📄 File *${namaFile.slice(0, 60)}* tersimpan, tapi formatnya belum saya dukung. Kirim sebagai PDF, DOCX, XLSX, CSV, atau TXT ya.`
+              : `📄 File *${namaFile.slice(0, 60)}* tersimpan tapi tidak bisa dibaca (mungkin rusak/terproteksi). Coba kirim ulang.`,
+            aiProvider: "rule_based", ms: Date.now() - t0m,
+          });
+        }
+        const teks = (parsed.text || "").trim().slice(0, 50000);
+        if (!teks) {
+          trainingLog({ ...mBase, filename: namaFile.slice(0, 200), tipe: parsed.tipe, ok: false, error: "teks kosong", ms: Date.now() - t0m });
+          return res.json({
+            ok: false, kind, savedMedia: mediaPath,
+            reply: `📄 File *${namaFile.slice(0, 60)}* terbaca tapi kosong (mungkin hasil pindaian/foto). Coba kirim sebagai foto agar saya analisis visual.`,
+            aiProvider: "rule_based", ms: Date.now() - t0m,
+          });
+        }
+        const ent = extractDocEntities(teks);
+        const rec = logDocument(String(senderPhone || ""), namaFile, parsed.tipe, buf.length, ent, mediaPath);
+        trainingLog({ ...mBase, filename: namaFile.slice(0, 200), tipe: parsed.tipe, docId: rec.id, entities: rec.ringkasan.slice(0, 500), ok: true, ms: Date.now() - t0m });
+        const kb = buf.length >= 1024 ? `${(buf.length / 1024).toFixed(1)} KB` : `${buf.length} B`;
+        const baris = [
+          `📄 *Dokumen diterima:* ${namaFile.slice(0, 60)} (${parsed.tipe.toUpperCase()}, ${kb})`,
+          ent.komoditas.length ? `• Komoditas: ${ent.komoditas.slice(0, 8).join(", ")}` : "",
+          ent.harga.length ? `• Harga disebut: ${ent.harga.slice(0, 5).join(" • ")}` : "",
+          ent.saprodi.length ? `• Saprodi/alat: ${ent.saprodi.slice(0, 8).join(", ")}` : "",
+          ent.komoditas.length || ent.harga.length || ent.saprodi.length
+            ? `Tersimpan sebagai \`${rec.id}\`. Mau saya carikan harga pasar atau buyer untuk komoditas ini?`
+            : `Tidak menemukan info komoditas/harga di dalamnya, tapi tersimpan sebagai \`${rec.id}\`.`,
+        ].filter(Boolean).join("\n");
+        return res.json({
+          ok: true, kind, docId: rec.id, tipe: parsed.tipe, entities: ent,
+          savedMedia: mediaPath, reply: baris, aiProvider: "rule_based", ms: Date.now() - t0m,
+        });
+      }
       // kind === "image"
       let analysis = "";
       try {
@@ -4071,6 +5289,86 @@ export function createServerApp() {
     } catch (err: any) {
       console.error("[WA Media Error]", err?.message || err);
       return res.status(500).json({ error: "Gagal memproses media: " + (err?.message || "Internal error") });
+    }
+  });
+
+  // POST lokasi WA dari forwarder: ShareLoc (msg.location Meta) -> koordinat
+  // petani. Auth sama seperti /api/wa-media (sesi admin atau forwarder resmi).
+  app.post("/api/wa-location", (req: any, res: any, next: any) => {
+    const s = readSession(req);
+    const adm = s ? adminsDb.find((a) => a.id === s.adminId && a.aktif) : undefined;
+    (req as any).sessionAdmin = adm;
+    const fs = (process.env.FORWARD_SECRET || "").trim();
+    const fwdOk = !!fs && String(req.headers["x-tani-forward-secret"] || "") === fs;
+    if (!adm && !fwdOk) return res.status(401).json({ error: "Butuh login admin atau forwarder resmi." });
+    next();
+  }, async (req, res) => {
+    const t0l = Date.now();
+    try {
+      const { latitude, longitude, name, address, senderPhone, waId } = req.body || {};
+      if (!senderPhone || typeof senderPhone !== "string") {
+        return res.status(400).json({ error: "senderPhone is required" });
+      }
+      if (!isValidWaCoords(latitude, longitude)) {
+        return res.status(400).json({ error: "latitude -90..90, longitude -180..180, keduanya wajib angka valid" });
+      }
+      const loc = {
+        latitude: Number(latitude),
+        longitude: Number(longitude),
+        name: sanitizeText(name, 200),
+        address: sanitizeText(address, 500),
+      };
+      const r = applyWaLocationToFarmer(senderPhone, loc, "wa-location");
+      // F1: ShareLoc melengkapi onboarding (LOC_ASK -> DONE; pre-consent: simpan saja).
+      let locJustDone = false;
+      if (!findAdmin(senderPhone)) {
+        let u = getUser(senderPhone);
+        if (!u) u = createUser(senderPhone);
+        u.locLat = Number(loc.latitude.toFixed(6));
+        u.locLng = Number(loc.longitude.toFixed(6));
+        if (r.label) u.locLabel = r.label;
+        u.locMapsUrl = r.mapsUrl;
+        u.locAt = new Date().toISOString();
+        u.locWeak = r.weak;
+        if (u.onboardingState === "LOC_ASK") {
+          u.onboardingState = "DONE";
+          locJustDone = true;
+          emitCanonicalEvent({
+            source: "wa-location", entity: "user", entityId: `user-${hashPhone(u.phone).slice(0, 12)}`,
+            action: "onboarded", actor: senderPhone, payload: { role: u.role || "PETANI" },
+          });
+        }
+        touchUser(u);
+      }
+      const activeAdmin = findAdmin(senderPhone);
+      const farmerHit = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(senderPhone));
+      trainingLog({
+        kind: "location", channel: "wa",
+        role: activeAdmin ? "admin" : (farmerHit ? "petani" : "tamu"),
+        phoneHash: hashPhone(senderPhone),
+        lat: Number(loc.latitude.toFixed(6)), lng: Number(loc.longitude.toFixed(6)),
+        label: r.label || undefined, mapsUrl: r.mapsUrl, weak: r.weak,
+        farmerId: r.farmerId || undefined, waId: String(waId || ""),
+        ok: true, ms: Date.now() - t0l,
+      });
+      const weakNote = r.weak
+        ? `\n\n⚠️ Titik terlihat di luar Indonesia — bila kurang tepat, balas dengan nama desa/kabupaten yang benar.`
+        : "";
+      let reply = r.updated
+        ? `📍 *Lokasi diterima!* Koordinat lahan Anda kami perbarui ke ${r.mapsUrl}${r.label ? `\n📌 ${r.label}` : ""}${weakNote}\n\nKetik *bantuan* untuk lanjut.`
+        : `📍 *Lokasi diterima!* Titik ${r.mapsUrl} tersimpan.${r.label ? `\n📌 ${r.label}` : ""}${weakNote}\n\nUntuk melengkapi pendaftaran, balas dengan: nama, komoditas, luas lahan, dan desa/kabupaten.`;
+      if (locJustDone) {
+        const du = getUser(senderPhone);
+        if (du) reply = `📍 *Lokasi diterima!* ${r.mapsUrl}${weakNote}\n\n${doneReply(du)}`;
+      }
+      return res.json({
+        ok: true, kind: "location", reply, aiProvider: "rule_based",
+        mapsUrl: r.mapsUrl, latitude: Number(loc.latitude.toFixed(6)), longitude: Number(loc.longitude.toFixed(6)),
+        weak: r.weak, farmerId: r.farmerId || null, ms: Date.now() - t0l,
+      });
+    } catch (err: any) {
+      console.error("[WA Location Error]", err?.message || err);
+      return res.status(500).json({ error: "Gagal memproses lokasi: " + (err?.message || "Internal error") });
     }
   });
 
@@ -4568,8 +5866,29 @@ export function createServerApp() {
     res.json(commoditiesDb);
   });
 
-  app.get("/api/harga-pasar", async (_req, res) => {
+  app.get("/api/harga-pasar", async (req, res) => {
     try {
+      const sumber = String((req.query as any)?.sumber || "siska").toLowerCase();
+      if (sumber === "mantung" || sumber === "semua") {
+        const mt = await fetchHargaMantung();
+        if (sumber === "mantung") {
+          res.json({
+            sumber: "Pasar Mantung Kab. Malang",
+            tanggal: mt.tanggal,
+            live: mt.live,
+            count: mt.daftar.length,
+            daftar: mt.daftar,
+          });
+          return;
+        }
+        const s = await fetchHargaPasar();
+        res.json({
+          sumber: "SISKAPERBAPO Disperindag Jatim + Pasar Mantung Kab. Malang",
+          siska: { tanggal: s.tanggal, live: s.live, count: s.daftar.length, daftar: s.daftar },
+          mantung: { tanggal: mt.tanggal, live: mt.live, count: mt.daftar.length, daftar: mt.daftar },
+        });
+        return;
+      }
       const { tanggal, daftar, live } = await fetchHargaPasar();
       res.json({
         sumber: "SISKAPERBAPO Disperindag Jatim",
@@ -4993,7 +6312,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       `• *Rata-rata Produktivitas:* *${filtered.length > 0 ? (fPanen / Math.max(fLuas, 0.1)).toFixed(1) : 0} Ton/Ha*\n` +
       `• *Kontribusi Terhadap Total Nasional:* *${((fLuas / Math.max(totalLuas, 1)) * 100).toFixed(1)}%*\n\n` +
       (filtered.length > 0 ? `🌾 *Sampel Petani Terdaftar:*\n${farmerSummaryList}\n\n` : "") +
-      `Seluruh data di atas tersinkronisasi otomatis dengan Google Sheets baris #2 sampai #${farmersDb.length + 1}.`;
+      `Seluruh data di atas tercatat di database Hai Tani (${filtered.length} petani). Arsip spreadsheet tersedia via tombol Unduh Data CSV.`;
 
     return {
       reply,
@@ -5004,6 +6323,335 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         "Rekomendasi Pemupukan",
       ],
     };
+  }
+
+  // ============ F1: Onboarding ToS + peran + ShareLoc + anti-spam ============
+  // Presedensi router: batalkan > spam > onboarding > ERP > ... (keputusan F0).
+  // Admin (termasuk SUPER_ADMIN) bebas onboarding + spam.
+  const TOS_VERSION = "2026-10-31a";
+  const TOS_TEXT_FINAL =
+    "🌾 *Selamat datang di hAI Tani!* Saya asisten AI pertanian + pencatatan usaha tani via WA.\n\n" +
+    "⚠️ *Syarat & Ketentuan:*\n" +
+    "1. Jawaban AI bersifat rekomendasi, bukan pengganti PPL/penyuluh. Saran & perhitungan bisa tidak akurat sepenuhnya.\n" +
+    "2. Seluruh chat & data yang Anda kirim (nama, lahan, lokasi, transaksi) DICATAT dan disimpan permanen untuk layanan, verifikasi, serta pengembangan & pelatihan AI hAI Tani. Data dikunci dan tidak dihapus.\n" +
+    "3. Harga pasar bersumber SISKAPERBAPO & Pasar Mantung, dapat berubah sewaktu-waktu.\n\n" +
+    "Dengan mengetik *SETUJU*, Anda menyetujui Syarat & Ketentuan ini.";
+  const ROLE_ASK_TEXT =
+    "Terima kasih! 🙏 Anda mendaftar sebagai:\n*1. Petani* | *2. Buyer/Pembeli Hasil Tani* | *3. Supplier/Saprodi*\n\nBalas angka atau namanya.";
+  const LOC_ASK_TEXT =
+    "Satu langkah lagi 📍. Kirim *Share Location* kebun/rumah (klik 📎 > Lokasi > Kirim lokasi saat ini) agar kami verifikasi wilayah & carikan harga/pembeli terdekat.\n\nAtau balas nama desa/kabupaten (verifikasi lemah, bisa dilengkapi nanti).";
+  function doneReply(u: UserRecord): string {
+    const roleName = (u.role as string) === "BUYER" ? "Buyer/Pembeli Hasil Tani" : u.role === "SUPPLIER" ? "Supplier/Saprodi" : "Petani";
+    const locLine = u.locMapsUrl ? `Lokasi: ${u.locMapsUrl}` : u.locLabel ? `Lokasi: ${u.locLabel}` : "Lokasi: belum ada";
+    const weakNote = u.onboardingState === "DONE_WEAK" ? "\n\n💡 Kirim *Share Location* kapan saja untuk verifikasi penuh." : "";
+    return `✅ Pendaftaran selesai! Peran: *${roleName}*.\n${locLine}${weakNote}\n\nKetik *bantuan* untuk mulai.`;
+  }
+  function getUser(phone?: string): UserRecord | undefined {
+    const key = normalizePhone(phone);
+    if (!key) return undefined;
+    return usersDb.find((u) => normalizePhone(u.phone) === key);
+  }
+  function createUser(phone: string): UserRecord {
+    const now = new Date().toISOString();
+    const u: UserRecord = {
+      phone: normalizePhone(phone) || String(phone || ""),
+      onboardingState: "NEW", tier: "FREE", status: "ACTIVE",
+      createdAt: now, updatedAt: now,
+    };
+    usersDb.push(u);
+    if (usersDb.length > 5000) usersDb.splice(0, usersDb.length - 5000);
+    saveUsersToDisk();
+    return u;
+  }
+  function touchUser(u: UserRecord): void {
+    u.updatedAt = new Date().toISOString();
+    saveUsersToDisk();
+  }
+  // F6: sodoran proaktif 1x/24 jam pada balasan santai (WA petani).
+  // Dipanggil dari wrapper res.json dengan konteks request eksplisit.
+  function maybeAppendNudge(body: any, ctx: { message: unknown; senderPhone: unknown; effPhone: unknown; isAdmin: boolean }): void {
+    if (!body || typeof body.reply !== "string" || !body.reply) return;
+    if ((body as any).ackPending) return;
+    if (ctx.isAdmin) return;
+    if (NUDGE_SKIPMSG_RE.test(String(ctx.message || "").toLowerCase())) return;
+    const u = getUser(String(ctx.effPhone || ctx.senderPhone || ""));
+    if (!u || (u.onboardingState !== "DONE" && u.onboardingState !== "DONE_WEAK")) return;
+    if (u.status === "BLOCKED" || u.nudgeOptOut || u.pendingAsk) return;
+    const now = Date.now();
+    if (u.lastNudgeAt && now - Date.parse(u.lastNudgeAt) < NUDGE_EVERY_MS) return;
+    const mePhone = normalizePhone(String(ctx.effPhone || ctx.senderPhone || ""));
+    const farmer = farmersDb.find((f) => normalizePhone(f.noHp) === mePhone);
+    if (!farmer) return;
+    // Draf terbuka = tengah alur lain -> jangan sodori.
+    try {
+      const wd: any = getWaDraft(String(ctx.senderPhone || ""));
+      const parts = [wd?.farmer, wd?.supplier, wd?.cash, wd?.stock, wd?.hpp];
+      if (parts.some((d) => d && typeof d === "object" && Object.keys(d).length > 0)) return;
+    } catch { /* lanjut tanpa info draf */ }
+    const pick = pickNudgeTarget(farmer.id);
+    if (!pick) return;
+    const at = new Date().toISOString();
+    body.reply += pick.text;
+    u.lastNudgeAt = at;
+    u.pendingAsk = { kind: "NUDGE", offerId: "", ts: at, nudge: { komoditasId: pick.kmd.id, field: "harga" } };
+    touchUser(u);
+    console.log(`[Nudge] sodor ${pick.kmd.komoditas} ke ${maskPhone(mePhone)}`);
+  }
+  // Telemetri tier pasif (rencana; TANPA enforcement sampai F9).
+  function bumpDailyChats(u: UserRecord): void {
+    const today = new Date().toISOString().slice(0, 10);
+    if (u.lastChatDate !== today) {
+      u.lastChatDate = today;
+      u.dailyChats = 0;
+    }
+    u.dailyChats = (u.dailyChats || 0) + 1;
+    u.updatedAt = new Date().toISOString();
+    saveUsersToDisk();
+  }
+  function isSuperAdminPhone(phone?: string): boolean {
+    const hit = findAdmin(phone);
+    return !!hit && hit.role === "SUPER_ADMIN";
+  }
+  // ---- Anti-spam per nomor (in-memory windows + skor persisten) ----
+  const spamTimes = new Map<string, number[]>();
+  const spamTexts = new Map<string, Array<{ t: number; norm: string }>>();
+  const INJECT_RE = /abaikan (semua )?instruksi|jailbreak|prompt.{0,20}(bocor|asli|sistem)|minta (kunci|token|api[\s_-]?key|password|sandi)|ungkapkan (instruksi|sistem)/i;
+  function checkSpam(phone: string, message: string): { verdict: "ok" | "cooldown" | "blocked"; user: UserRecord } {
+    let user = getUser(phone);
+    if (!user) user = createUser(phone);
+    const now = Date.now();
+    if (user.status === "BLOCKED") return { verdict: "blocked", user };
+    if ((user.spamCooldownUntil || 0) > now) {
+      recordSpamHit(user, phone, message, now);
+      return { verdict: (String(user.status) === "BLOCKED") ? "blocked" : "cooldown", user };
+    }
+    recordSpamHit(user, phone, message, now);
+    if (String(user.status) === "BLOCKED") return { verdict: "blocked", user };
+    if ((user.spamCooldownUntil || 0) > now) return { verdict: "cooldown", user };
+    return { verdict: "ok", user };
+  }
+  function recordSpamHit(user: UserRecord, phone: string, message: string, now: number): void {
+    const key = normalizePhone(phone) || phone;
+    const times = (spamTimes.get(key) || []).filter((t) => now - t < 5 * 60 * 1000);
+    times.push(now);
+    spamTimes.set(key, times);
+    const norm = String(message || "").toLowerCase().trim().slice(0, 200);
+    const texts = (spamTexts.get(key) || []).filter((e) => now - e.t < 10 * 60 * 1000);
+    texts.push({ t: now, norm });
+    spamTexts.set(key, texts);
+    const sameCount = texts.filter((e) => e.norm === norm).length;
+    const unstructured = String(message || "").length > 1000 && !String(message || "").includes("\n");
+    let hits = 0;
+    if (times.length > 20) hits += 2;
+    if (norm && sameCount >= 5) hits += 2;
+    if (INJECT_RE.test(String(message || ""))) hits += 1;
+    if (unstructured) hits += 1;
+    if (hits <= 0) return;
+    user.spamScore = (user.spamScore || 0) + hits;
+    user.spamCooldownUntil = now + 60 * 1000;
+    // F1b: TANPA blokir otomatis. Skor>=3 -> FLAG + notif nomor ASLI ke super
+    // admin; keputusan biarkan/blokir di tangan super admin (via chat).
+    if (user.spamScore >= 3 && user.status !== "FLAGGED" && user.status !== "BLOCKED") {
+      user.status = "FLAGGED";
+      user.blockReason = `spam skor ${user.spamScore}`;
+      emitCanonicalEvent({
+        source: "wa-chat", entity: "user", entityId: `user-${hashPhone(phone).slice(0, 12)}`,
+        action: "flagged", actor: phone, payload: { reason: user.blockReason },
+      });
+      const rawDigits = String(phone || "").replace(/\D/g, "");
+      if (!/^62700/.test(rawDigits)) {
+        const sample = String(message || "").trim().slice(0, 80);
+        sendWaText(SUPER_ADMIN_PHONE,
+          `🚩 Anti-spam FLAG: nomor ${rawDigits} (skor ${user.spamScore}). Contoh: "${sample}".\nBalas "blokir ${rawDigits}" atau "izinkan ${rawDigits}".`
+        ).catch(() => {});
+      }
+    }
+    touchUser(user);
+  }
+  const BARE_CANCEL_RE = /^\s*batal(kan|in)?\s*(semuanya|semua|aja|saja|dulu|deh|dong)?\s*[!.\s]*$/i;
+  // F1b: moderasi super admin via chat ("blokir 08xx" / "izinkan 08xx").
+  // Return objek respons = ditangani; null = bukan perintah moderasi.
+  function handleSuperAdminModeration(message: string, effPhone?: string): any {
+    if (!isSuperAdminPhone(effPhone)) return null;
+    const t = String(message || "").trim();
+    const mBlock = t.match(/^(blokir|blockir)\s+(\+?[0-9][0-9\s\-.]{8,})$/i);
+    const mAllow = t.match(/^(izinkan|buka blokir|unblock)\s+(\+?[0-9][0-9\s\-.]{8,})$/i);
+    if (!mBlock && !mAllow) return null;
+    const digits = (mBlock ? mBlock[2] : (mAllow as RegExpMatchArray)[2]).replace(/\D/g, "");
+    const norm = normalizePhone(digits);
+    let u = usersDb.find((x) => normalizePhone(x.phone) === norm);
+    if (mBlock) {
+      if (!u && norm.length >= 10 && norm.length <= 16) u = createUser(digits);
+      if (!u) return { reply: "Nomor tidak valid.", quickReplies: [], extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based" };
+      u.status = "BLOCKED";
+      u.blockedAt = new Date().toISOString();
+      u.blockReason = "manual super admin";
+      u.blockNoticed = false;
+      touchUser(u);
+      return { reply: `🚫 Nomor ${digits} DIBLOKIR. Balas "izinkan ${digits}" untuk membuka.`, quickReplies: [], extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based" };
+    }
+    if (!u) return { reply: "Nomor tidak ditemukan di database user.", quickReplies: [], extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based" };
+    u.status = "ACTIVE";
+    u.spamScore = 0;
+    u.spamCooldownUntil = 0;
+    u.blockNoticed = false;
+    touchUser(u);
+    return { reply: `✅ Nomor ${digits} dibuka kembali (ACTIVE, skor spam direset).`, quickReplies: [], extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based" };
+  }
+  function cancelOnboardingReply(user: UserRecord, isAdmin: boolean): any {
+    user.onboardingState = "NEW";
+    user.onboardingTries = 0;
+    touchUser(user);
+    return {
+      reply: "Onboarding dibatalkan. Ketik apa pun untuk mengulang dari Syarat & Ketentuan.",
+      quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "Daftarkan Petani"] : ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini"],
+      extracted: {}, extractedSupplier: {}, extractedCash: {}, extractedStock: {}, extractedHpp: {},
+      clearFarmerDraft: true, clearSupplierDraft: true, clearErpDrafts: true,
+      isComplete: true, isAdminAction: isAdmin, aiProvider: "rule_based",
+    };
+  }
+  function parseRoleInput(lower: string): UserRole | undefined {
+    const t = (lower || "").trim();
+    if (/^1\b|petani|\btani\b/.test(t)) return "PETANI";
+    if (/^2\b|tengkulak|pengepul|offtaker|off-taker|buyer|pembeli|penampung|penadah/.test(t)) return "BUYER";
+    if (/^3\b|supplier|toko|saprodi|kios|pupuk|obat|agen/.test(t)) return "SUPPLIER";
+    return undefined;
+  }
+  const SMALLTALKISH_RE = /^(halo+|hai+|hi+|pagi|siang|sore|malam|makasih|terima kasih|thanks?|ok+|oke+|siap|baik|test|tes|ping|assalamu'?alaikum|punten)[?!.\s]*$/i;
+  const FUNCTIONAL_RE = /daftar|harga|cek |cek$|status|bantuan|help|menu|manfaat|benefit|hama|penyakit|pupuk|dosis|kas\b|stok|hpp|rekap|verifikasi|komoditas|panen|cuaca/i;
+  function completeOnboardingWeak(user: UserRecord, label: string, draft?: any): void {
+    user.role = user.role || "PETANI";
+    const dLat = Number(draft?.latitude);
+    const dLng = Number(draft?.longitude);
+    if (Number.isFinite(dLat) && Number.isFinite(dLng) && isValidWaCoords(dLat, dLng)) {
+      user.locLat = Number(dLat.toFixed(6));
+      user.locLng = Number(dLng.toFixed(6));
+      user.locMapsUrl = waLocationMapsUrl(user.locLat, user.locLng);
+      user.locAt = new Date().toISOString();
+    }
+    if (label) {
+      user.locLabel = label.slice(0, 200);
+      user.locAt = user.locAt || new Date().toISOString();
+    }
+    user.locWeak = !(user.locLat !== undefined && user.locLng !== undefined);
+    user.onboardingState = "DONE_WEAK";
+    touchUser(user);
+    emitCanonicalEvent({
+      source: "wa-chat", entity: "user", entityId: `user-${hashPhone(user.phone).slice(0, 12)}`,
+      action: "onboarded_weak", actor: user.phone, payload: { role: user.role },
+    });
+  }
+  // Return objek respons = tangani di sini; null = DONE, lanjut alur normal.
+  function handleOnboarding(message: string, user: UserRecord, ctx: { isAdmin: boolean; currentDraft?: any }): any {
+    if (ctx.isAdmin) return null;
+    const lower = String(message || "").toLowerCase().trim();
+    if (user.status === "BLOCKED") {
+      if (!user.blockNoticed) {
+        user.blockNoticed = true;
+        touchUser(user);
+        return { reply: "Nomor ini dibatasi sementara karena aktivitas mencurigakan. Hubungi PPL/dinas untuk membuka blokir.", quickReplies: [], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based" };
+      }
+      return { reply: "", quickReplies: [], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based" };
+    }
+    if (user.onboardingState === "DONE" || user.onboardingState === "DONE_WEAK") return null;
+    if (user.onboardingState === "DECLINED") {
+      if (/\bsetuju\b/.test(lower) && !/tidak setuju|gak setuju|nggak setuju/.test(lower)) {
+        user.tosVersion = TOS_VERSION;
+        user.tosAt = new Date().toISOString();
+        user.status = "ACTIVE";
+        user.declineNoticed = false;
+        const legacyFarmer = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(user.phone));
+        if (legacyFarmer) {
+          user.role = "PETANI";
+          user.onboardingState = "DONE_WEAK";
+          touchUser(user);
+          return { reply: doneReply(user), quickReplies: ["Cek Harga Pasar Hari Ini", "Daftarkan Lahan Saya"], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based" };
+        }
+        user.onboardingState = "ROLE_ASK";
+        user.onboardingTries = 0;
+        touchUser(user);
+        return { reply: ROLE_ASK_TEXT, quickReplies: ["Petani", "Buyer", "Supplier"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+      }
+      if (/harga|cek |cek$|berapa|bantuan|help|menu|manfaat|benefit|program|tentang/.test(lower)) return null;
+      if (!user.declineNoticed) {
+        user.declineNoticed = true;
+        touchUser(user);
+        return { reply: "Layanan penuh butuh persetujuan Syarat & Ketentuan. Balas *SETUJU* untuk lanjut, atau tanya harga pasar & info program saja.", quickReplies: ["Cek Harga Pasar Hari Ini"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+      }
+      return { reply: "", quickReplies: [], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based" };
+    }
+    if (BARE_CANCEL_RE.test(String(message || ""))) return cancelOnboardingReply(user, ctx.isAdmin);
+    if (user.onboardingState === "NEW") {
+      user.onboardingState = "TOS_SENT";
+      user.onboardingTries = 0;
+      touchUser(user);
+      return { reply: TOS_TEXT_FINAL, quickReplies: ["SETUJU"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+    }
+    if (user.onboardingState === "TOS_SENT") {
+      // Tolak dicek DULU: "tidak setuju" mengandung kata "setuju".
+      if (/tidak setuju|gak setuju|nggak setuju|^tolak\b|menolak|tidak mau/.test(lower)) {
+        user.onboardingState = "DECLINED";
+        user.status = "DECLINED";
+        touchUser(user);
+        return { reply: "Baik, kami catat. Tanpa persetujuan, layanan terbatas pada info harga pasar & program. Balas *SETUJU* kapan saja untuk membuka layanan penuh.", quickReplies: ["Cek Harga Pasar Hari Ini"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+      }
+      if (/\bsetuju\b/.test(lower)) {
+        user.tosVersion = TOS_VERSION;
+        user.tosAt = new Date().toISOString();
+        const legacyFarmer = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(user.phone));
+        if (legacyFarmer) {
+          user.role = "PETANI";
+          user.locLabel = String(legacyFarmer.alamat || legacyFarmer.kabupaten || "").slice(0, 200) || undefined;
+          user.locAt = new Date().toISOString();
+          user.locWeak = true;
+          user.onboardingState = "DONE_WEAK";
+          touchUser(user);
+          return { reply: `✅ Selamat datang kembali, *${legacyFarmer.nama}*!\nStatus petani terverifikasi: *${legacyFarmer.statusVerifikasi}*.\n\n${doneReply(user)}`, quickReplies: ["Cek Harga Pasar Hari Ini", "Cek Status Lahan Saya"], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based" };
+        }
+        user.onboardingState = "ROLE_ASK";
+        user.onboardingTries = 0;
+        touchUser(user);
+        return { reply: ROLE_ASK_TEXT, quickReplies: ["Petani", "Buyer", "Supplier"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+      }
+      user.onboardingTries = (user.onboardingTries || 0) + 1;
+      touchUser(user);
+      const short = user.onboardingTries >= 2;
+      return { reply: short ? "Balas *SETUJU* untuk menyetujui Syarat & Ketentuan, atau *TOLAK*." : `${TOS_TEXT_FINAL}\n\n_Balas *SETUJU* untuk lanjut, atau *TOLAK*._`, quickReplies: ["SETUJU"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+    }
+    if (user.onboardingState === "ROLE_ASK") {
+      const role = parseRoleInput(lower);
+      if (role) {
+        user.role = role;
+        // ShareLoc sudah masuk duluan (via /api/wa-location) -> langsung DONE.
+        if (user.locLat !== undefined && user.locLng !== undefined) {
+          user.onboardingState = "DONE";
+          user.locWeak = false;
+          touchUser(user);
+          return { reply: doneReply(user), quickReplies: ["Cek Harga Pasar Hari Ini", "Daftarkan Lahan Saya"], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based" };
+        }
+        user.onboardingState = "LOC_ASK";
+        user.onboardingTries = 0;
+        touchUser(user);
+        return { reply: LOC_ASK_TEXT, quickReplies: [], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+      }
+      user.onboardingTries = (user.onboardingTries || 0) + 1;
+      touchUser(user);
+      return { reply: user.onboardingTries >= 2 ? "Balas *1*, *2*, atau *3*." : `${ROLE_ASK_TEXT}\n\n_Balas angka atau namanya._`, quickReplies: ["Petani", "Buyer", "Supplier"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+    }
+    // LOC_ASK: ShareLoc via /api/wa-location (DONE) atau alamat teks (DONE_WEAK).
+    if (SMALLTALKISH_RE.test(String(message || "").trim())) {
+      return { reply: LOC_ASK_TEXT, quickReplies: [], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+    }
+    if (FUNCTIONAL_RE.test(String(message || ""))) {
+      completeOnboardingWeak(user, "", ctx.currentDraft);
+      return null; // pesan fungsional tetap dilayani alur normal
+    }
+    const label = String(message || "").trim().slice(0, 200);
+    if (label.length >= 4) {
+      completeOnboardingWeak(user, label, ctx.currentDraft);
+      return { reply: doneReply(user), quickReplies: ["Cek Harga Pasar Hari Ini", "Daftarkan Lahan Saya"], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based" };
+    }
+    return { reply: LOC_ASK_TEXT, quickReplies: [], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
   }
 
   // POST Chatbot endpoint (Kang Tani AI) with Role-Based Access Control (RBAC) & Cost Optimization
@@ -5043,6 +6691,15 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       const origJson = res.json.bind(res);
       res.json = ((body: any) => {
         try { saveWaDraft(senderPhone, body); } catch {}
+        try { maybeAppendNudge(body, { message, senderPhone, effPhone, isAdmin }); } catch (err) { console.error("[Nudge] gagal:", (err as any)?.message || err); }
+        try {
+          // F7: jawaban jujur-tidak-tahu dari LLM -> log TIDAK_TAHU (sekali,
+          // bukan dari cache).
+          const ap = (body as any)?.aiProvider;
+          if (typeof body?.reply === "string" && body.reply.includes("belum mengetahui hal ini") && ap !== "cache") {
+            logFeedback(String(senderPhone || ""), "TIDAK_TAHU", String(message || ""), `via-${ap || "llm"}`);
+          }
+        } catch (err) { console.error("[Feedback] autolog gagal:", (err as any)?.message || err); }
         const out = origJson(body);
         try {
           const farmerHit = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(senderPhone));
@@ -5058,6 +6715,134 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         } catch {}
         return out;
       }) as any;
+    }
+
+    // F1b: perintah moderasi super admin (pola ketat; non-perintah lolos).
+    if (isAdmin) {
+      const mod = handleSuperAdminModeration(message, String(effPhone || senderPhone || ""));
+      if (mod) return res.json(mod as any);
+    }
+
+    // F1: spam -> onboarding (admin bebas; identitas tak wajar dilewati = perilaku lama).
+    const f1Key = normalizePhone(String(effPhone || senderPhone || ""));
+    if (!isAdmin && f1Key.length >= 10 && f1Key.length <= 16) {
+      const spam = checkSpam(String(effPhone || senderPhone || ""), message);
+      if (spam.verdict === "cooldown") {
+        return res.json({
+          reply: "⏳ Pelan-pelan ya Bpk/Ibu, kirim pesan lagi dalam semenit.",
+          quickReplies: [], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based",
+        } as any);
+      }
+      bumpDailyChats(spam.user);
+      const ob = handleOnboarding(message, spam.user, { isAdmin, currentDraft });
+      if (ob) return res.json(ob as any);
+    }
+
+    // 0a-commodity (F2). Daftar milikku | tambah komoditas | panen selesai.
+    // Ditempatkan awal agar tak disergap cabang pendaftaran/estimasi.
+    {
+      const lowerC = String(message || "").toLowerCase();
+      const isList = /komoditas\s+(saya|ku|gue|kita)|daftar komoditas|list komoditas|komoditas milik|komoditasku/.test(lowerC);
+      const mAdd = lowerC.match(/tambah\s+komoditas\s+(.+)/);
+      const mClose = lowerC.match(/(panen selesai|tutup komoditas|selesai panen)\s+(.+)/);
+      if (isList || mAdd || mClose) {
+        const idAsk = String(message || "").match(/TANI-\d+/i);
+        let farmer: FarmerRecord | undefined;
+        if (isAdmin && idAsk) {
+          farmer = farmersDb.find((f) => f.id.toUpperCase() === idAsk[0].toUpperCase());
+        } else if (!isAdmin || !idAsk) {
+          farmer = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(String(effPhone || senderPhone || "")));
+        }
+        const needReg = `ⓘ Nomor ini belum terdaftar sebagai petani. Daftarkan lahan dulu via "daftar".`;
+        if (!farmer) {
+          return res.json({
+            reply: (isAdmin && !idAsk) ? `Sertakan ID petani, mis. "komoditas TANI-013".` : needReg,
+            quickReplies: [], extracted: {}, isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+          } as any);
+        }
+        const rows = komoditasDb.filter((k) => k.farmerId === farmer!.id);
+        if (isList) {
+          if (rows.length === 0) {
+            return res.json({
+              reply: `ⓘ *${farmer.nama}* belum punya riwayat komoditas. Tambah via "tambah komoditas <nama> <luas>".`,
+              quickReplies: [], extracted: {}, isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+            } as any);
+          }
+          const lines = rows.map((k, i) => {
+            const det: string[] = [];
+            if (Number(k.luasHa) > 0) det.push(`${k.luasHa} Ha`);
+            if (k.varietas) det.push(k.varietas);
+            if (k.estimasiPanen) det.push(`panen ${k.estimasiPanen}`);
+            if (Number(k.estimasiHasilTon) > 0) det.push(`~${k.estimasiHasilTon} ton`);
+            if (Number(k.stokSiapJualTon) > 0) det.push(`stok ${fmtKg(Number(k.stokSiapJualTon) * 1000)}`);
+            if (Number(k.hargaMintaPerKg) > 0) det.push(`minta ${fmtRp(Number(k.hargaMintaPerKg))}/kg`);
+            return `${i + 1}. *${k.komoditas}* (${k.status})${det.length ? ` — ${det.join(", ")}` : ""} [\`${k.id}\`]`;
+          });
+          return res.json({
+            reply: `🌾 *Komoditas ${farmer.nama}* (${farmer.id}):\n${lines.join("\n")}\n\nTambah: "tambah komoditas <nama> <luas>". Tutup musim: "panen selesai <nama>".`,
+            quickReplies: [], extracted: {}, isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+          } as any);
+        }
+        if (mAdd) {
+          const parsed = extractFarmerFromText(mAdd[1] || "", {});
+          let kom = String(parsed.extracted.komoditas || "").trim();
+          if (!kom) {
+            // Fallback: 1-3 kata alfa sisa setelah buang pola angka/satuan/bulan.
+            const clean = String(mAdd[1] || "")
+              .replace(/\d+(?:[.,]\d+)?\s*(ha|hektar|h\b|m2|m²|are|ru|ubin|ton|kg|kwintal|kuintal)/gi, " ")
+              .replace(/varietas\s+[a-z0-9\- ]+/gi, " ")
+              .replace(/hasil\s+\d+(?:[.,]\d+)?\s*\w*/gi, " ")
+              .replace(/[^a-zA-Z ]/g, " ").replace(/\s+/g, " ").trim();
+            const words = clean.split(" ").filter(Boolean);
+            if (words.length >= 1 && words.length <= 3) kom = words.slice(0, 3).join(" ");
+          }
+          if (!kom) {
+            return res.json({
+              reply: `Komoditas apa yang ditambah? Contoh: "tambah komoditas jagung 0,5 ha".`,
+              quickReplies: [], extracted: {}, isComplete: false, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+            } as any);
+          }
+          const rec = appendCommodity(farmer.id, {
+            komoditas: kom,
+            varietas: parsed.extracted.varietas || "",
+            luasHa: Number(parsed.extracted.luasLahan) || 0,
+            estimasiPanen: parsed.extracted.estimasiPanen || "",
+            estimasiHasilTon: Number(parsed.extracted.estimasiHasilTon) || 0,
+          });
+          syncLegacyCommodityFields(farmer);
+          saveFarmersToDisk();
+          const n = komoditasDb.filter((k) => k.farmerId === farmer!.id).length;
+          return res.json({
+            reply: `✅ Komoditas *${rec.komoditas}* ditambahkan untuk *${farmer.nama}* (\`${rec.id}\`, AKTIF). Total ${n} komoditas.\nKetik "komoditas saya" untuk daftar.`,
+            quickReplies: ["Komoditas Saya", "Cek Harga Pasar Hari Ini"], extracted: {}, isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+          } as any);
+        }
+        // mClose: tutup musim (SELESAI) berdasar nama (substring, terbaru menang).
+        const want = String(mClose![2] || "").toLowerCase().trim();
+        const cands = rows.filter((k) => k.status === "AKTIF" && k.komoditas.toLowerCase().includes(want));
+        const target = cands[cands.length - 1];
+        if (!target) {
+          const aktif = rows.filter((k) => k.status === "AKTIF").map((k) => k.komoditas).join(", ") || "-";
+          return res.json({
+            reply: `ⓘ Tidak ada komoditas AKTIF bernama "${mClose![2].trim()}" untuk *${farmer.nama}*. Yang AKTIF: ${aktif}.`,
+            quickReplies: [], extracted: {}, isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+          } as any);
+        }
+        target.status = "SELESAI";
+        target.updatedAt = new Date().toISOString();
+        saveKomoditasToDisk();
+        emitCanonicalEvent({
+          source: "wa-chat", entity: "commodity", entityId: target.id,
+          action: "close", actor: senderPhone,
+          payload: { farmerId: farmer.id, komoditas: target.komoditas },
+        });
+        syncLegacyCommodityFields(farmer);
+        saveFarmersToDisk();
+        return res.json({
+          reply: `✅ Musim *${target.komoditas}* (\`${target.id}\`) ditandai SELESAI untuk *${farmer.nama}*. Sukses panennya! 🌾`,
+          quickReplies: ["Komoditas Saya"], extracted: {}, isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+        } as any);
+      }
     }
 
     // 0z. Fast-path smalltalk: 0ms, tanpa LLM/Laya (salam, identitas, makasih, bantuan).
@@ -5096,6 +6881,11 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     {
       const bareCancel = /^\s*batal(kan|in)?\s*(semuanya|semua|aja|saja|dulu|deh|dong)?\s*[!.\s]*$/i.test(message || "");
       if (bareCancel) {
+        const cancelUser = getUser(String(effPhone || senderPhone || ""));
+        if (cancelUser?.pendingAsk) {
+          cancelUser.pendingAsk = undefined;
+          touchUser(cancelUser);
+        }
         return res.json({
           reply: hasOpenDraft
             ? "Baik, semua draf dibatalkan (pendaftaran petani/supplier/kas/stok/HPP). Ketik *daftar* atau *catat kas* kapan pun untuk memulai lagi."
@@ -5106,6 +6896,617 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           isComplete: true, isAdminAction: isAdmin, aiProvider: "rule_based",
         } as any);
       }
+    }
+
+    // 0b-negotiator (F3). Buyer butuh -> stok jujur -> tanya harga ke petani
+    // -> cocok vs budget -> deal + komisi kas. SEBELUM cabang ERP/harga/
+    // estimasi agar "stok X N kg" tak disergap estimasi panen/stok saprodi.
+    // Prioritas: (1) jawaban pendingAsk, (2) cek/batal, (3) demand buyer,
+    // (4) lapor stok petani, (5) harga jual petani, (6) budget, (7) deal.
+    {
+      const lowerN = String(message || "").toLowerCase();
+      const mePhone = normalizePhone(String(effPhone || senderPhone || ""));
+      const meFarmer = farmersDb.find((f) => normalizePhone(f.noHp) === mePhone);
+      // Admin lewat tanpa UserRecord (F1); negosiasi eksplisit tetap jalan.
+      const negoUser: UserRecord | undefined = getUser(mePhone);
+      const clearAsk = () => {
+        if (negoUser?.pendingAsk) {
+          negoUser.pendingAsk = undefined;
+          touchUser(negoUser);
+        }
+      };
+      const nogoReply = (reply: string, qr: string[] = []) => res.json({
+        reply, quickReplies: qr, extracted: {}, isComplete: true,
+        isAdminAction: !!isAdmin, aiProvider: "rule_based",
+      } as any);
+      const setAsk = (u: UserRecord, kind: "HARGA_JUAL" | "BUDGET" | "KONFIRM_DEAL", offerId: string) => {
+        u.pendingAsk = { kind, offerId, ts: new Date().toISOString() };
+        touchUser(u);
+      };
+      const myOpenOffer = (asBuyer: boolean): Offer | undefined => {
+        const mine = offersDb.filter((o) => o.status !== "DEAL" && o.status !== "BATAL"
+          && (asBuyer ? normalizePhone(o.buyerPhone) === mePhone
+            : !!meFarmer && o.lines.some((l) => l.farmerId === meFarmer!.id)));
+        return mine[mine.length - 1];
+      };
+      const stockListText = (cands: FarmerCommodity[], kom: string, qty: number): string => {
+        if (cands.length === 0) {
+          return `Belum ada petani yang lapor stok *${kom}* ready. Permintaan dicatat — petani akan kami tanyai saat mereka lapor stok.`;
+        }
+        const total = cands.reduce((a, k) => a + Number(k.stokSiapJualTon || 0) * 1000, 0);
+        const list = cands.slice(0, 10).map((k) => {
+          const f = farmersDb.find((x) => x.id === k.farmerId);
+          return `• ${f ? f.nama : k.farmerId}: siap ${fmtKg(Number(k.stokSiapJualTon) * 1000)}`;
+        }).join("\n");
+        return `Stok ready saat ini (total ${fmtKg(total)}):\n${list}` +
+          (total < qty ? `\n\n⚠️ Total stok (${fmtKg(total)}) kurang dari kebutuhan (${fmtKg(qty)}). Kami tanyakan harga ke petani — yang cocok kami agregasi.` : "");
+      };
+      const composeBuyerFit = (o: Offer, ev: { cocokKg: number; overLines: OfferLine[]; waitingPrice: number }): string => {
+        const need = Number(o.qtyKg) || 0;
+        if (o.status === "COCOK") {
+          if (negoUser) setAsk(negoUser, "KONFIRM_DEAL", o.id);
+          const alloc = o.lines.filter((l) => Number(l.alokasiKg) > 0).map((l) => {
+            const f = farmersDb.find((x) => x.id === l.farmerId);
+            return `• ${f ? f.nama : l.farmerId}: ${fmtKg(Number(l.alokasiKg))} @ ${fmtRp(Number(l.hargaPetaniPerKg))}/kg`;
+          }).join("\n");
+          const toFarmers = o.lines.reduce((a, l) => a + (Number(l.alokasiKg) || 0) * Number(l.hargaPetaniPerKg || 0), 0);
+          return `🤝 *COCOK! ${o.id}* — ${fmtKg(need)} ${o.komoditas} terpenuhi penuh:\n${alloc}\n\n` +
+            `• Anda bayar: ${fmtRp(Number(o.budgetPerKg) * need)} (${fmtRp(Number(o.budgetPerKg))}/kg)\n` +
+            `• Diterima petani: ${fmtRp(toFarmers)}\n` +
+            `• *Komisi Hai Tani: ${fmtRp(Number(o.spreadTotalRp) || 0)}*\n\n` +
+            `Balas *"deal oke"* untuk konfirmasi, atau *"batal ${o.id}"*.`;
+        }
+        if (o.status === "SEBAGIAN") {
+          return `⚠️ *${o.id} SEBAGIAN*: baru ${fmtKg(ev.cocokKg)} dari ${fmtKg(need)} yang masuk budget ${fmtRp(Number(o.budgetPerKg))}/kg.\n` +
+            `Ketik "cek penawaran" untuk rincian, tambah budget ("budget 9000"), atau tunggu petani lain.`;
+        }
+        let why = "";
+        if (ev.overLines.length > 0) {
+          why += ev.overLines.map((l) => {
+            const f = farmersDb.find((x) => x.id === l.farmerId);
+            return `• ${f ? f.nama : l.farmerId} minta ${fmtRp(Number(l.hargaPetaniPerKg))}/kg — di atas budget ${fmtRp(Number(o.budgetPerKg))}/kg.`;
+          }).join("\n") + "\n";
+        }
+        if (ev.waitingPrice > 0) why += `• ${ev.waitingPrice} petani belum pasang harga — menunggu.\n`;
+        if (!why) why = "• Belum ada petani yang lapor stok.\n";
+        return `📝 *${o.id}*: budget ${fmtRp(Number(o.budgetPerKg))}/kg tercatat, belum ada yang cocok.\n${why}Ketik "cek penawaran" kapan pun untuk update.`;
+      };
+      const farmerFitText = (o: Offer, fr: FarmerRecord): string => {
+        const ln = o.lines.find((l) => l.farmerId === fr.id);
+        const myP = Number(ln?.hargaPetaniPerKg) || 0;
+        const b = Number(o.budgetPerKg) || 0;
+        if (b > 0 && myP > 0 && myP <= b && Number(ln?.alokasiKg) > 0) {
+          return `✅ Harga Anda ${fmtRp(myP)}/kg *MASUK* budget buyer (${fmtRp(b)}/kg) untuk *${o.id}*.\n` +
+            `Alokasi dari stok Anda: ${fmtKg(Number(ln!.alokasiKg))}. Menunggu konfirmasi deal buyer — ketik "cek penawaran" untuk update.`;
+        }
+        if (b > 0 && myP > b) {
+          return `✅ Harga Anda ${fmtRp(myP)}/kg tercatat untuk *${o.id}*, tapi di atas budget buyer (${fmtRp(b)}/kg).\n` +
+            `Sudah kami teruskan — buyer boleh menaikkan budget. Ketik "cek penawaran" untuk update.`;
+        }
+        if (b > 0 && myP > 0 && myP <= b) {
+          return `✅ Harga Anda ${fmtRp(myP)}/kg *MASUK* budget buyer (${fmtRp(b)}/kg) untuk *${o.id}*, tapi belum dapat alokasi (stok Anda habis atau kebutuhan sudah dipenuhi petani lain).\n` +
+            `Ketik "cek penawaran" untuk update.`;
+        }
+        return `✅ Harga ${fmtRp(myP)}/kg tercatat untuk *${o.id}*.\n` +
+          `Budget buyer belum ada — sudah kami mintakan. Ketik "cek penawaran" untuk update.`;
+      };
+      const doBudget = (o: Offer, price: number): string => {
+        o.budgetPerKg = price;
+        o.budgetAt = new Date().toISOString();
+        const ev = evalOffer(o);
+        saveOffersToDisk();
+        emitCanonicalEvent({
+          source: "wa-chat", entity: "offer", entityId: o.id,
+          action: "budget", actor: mePhone,
+          payload: { budgetPerKg: price, status: o.status },
+        });
+        return composeBuyerFit(o, ev);
+      };
+      const doFarmerPrice = (o: Offer, price: number): string => {
+        let line = o.lines.find((l) => l.farmerId === meFarmer!.id);
+        if (!line) {
+          const cand = findStockCandidates(o.komoditas).find((k) => k.farmerId === meFarmer!.id);
+          if (!cand) return `ⓘ Stok ${o.komoditas} Anda 0 — laporkan dulu via "stok ${o.komoditas} <qty>".`;
+          line = { farmerId: meFarmer!.id, komoditasId: cand.id, stokKg: Math.round(Number(cand.stokSiapJualTon) * 1000) };
+          o.lines.push(line);
+        }
+        line.hargaPetaniPerKg = price;
+        line.hargaAt = new Date().toISOString();
+        const krow = komoditasDb.find((x) => x.id === line!.komoditasId);
+        if (krow) {
+          krow.hargaMintaPerKg = price;
+          krow.hargaMintaAt = line.hargaAt;
+          krow.updatedAt = line.hargaAt;
+          saveKomoditasToDisk();
+        }
+        evalOffer(o);
+        saveOffersToDisk();
+        emitCanonicalEvent({
+          source: "wa-chat", entity: "offer", entityId: o.id,
+          action: "price", actor: mePhone,
+          payload: { farmerId: meFarmer!.id, hargaPetaniPerKg: price, status: o.status },
+        });
+        return farmerFitText(o, meFarmer!);
+      };
+      const doDeal = (o: Offer): string => {
+        const { kasId, spread } = finalizeOfferDeal(o, mePhone);
+        clearOfferAsks(o.id);
+        const kasTxt = kasId ? ` Komisi ${fmtRp(spread)} masuk kas Hai Tani (\`${kasId}\`).` : " Tanpa selisih komisi.";
+        return `✅ *DEAL ${o.id}!* ${fmtKg(Number(o.qtyKg))} ${o.komoditas} — buyer ${fmtRp(Number(o.budgetPerKg))}/kg.${kasTxt}\n\n${offerStatusText(o, "buyer")}`;
+      };
+
+      // (0) F6-tarikan: admin reset + petani lapor/minta pengingat harga
+      // (eksplisit, tanpa gerbang 24 jam). Sebelum blok pendingAsk.
+      const mNudgeReset = String(message || "").match(/^\s*reset pengingat\s+(TANI-\d+)\s*$/i);
+      if (mNudgeReset && isAdmin) {
+        const fr = farmersDb.find((f) => f.id.toUpperCase() === mNudgeReset[1].toUpperCase());
+        const fu = fr ? getUser(fr.noHp) : undefined;
+        if (!fr || !fu) return nogoReply(`ⓘ Petani ${mNudgeReset[1].toUpperCase()} / nomornya tidak ditemukan.`);
+        fu.lastNudgeAt = undefined;
+        fu.nudgeOptOut = undefined;
+        if (fu.pendingAsk?.kind === "NUDGE") fu.pendingAsk = undefined;
+        touchUser(fu);
+        return nogoReply(`✅ Pengingat harga untuk *${fr.nama}* (${fr.id}) direset — sodoran berikutnya aktif lagi.`);
+      }
+      if (/^\s*(lapor harga|minta pengingat|aktifkan pengingat)\s*$/i.test(String(message || ""))) {
+        if (!meFarmer) return nogoReply(`ⓘ Nomor ini belum terdaftar sebagai petani.`);
+        if (/minta pengingat|aktifkan pengingat/i.test(String(message || "")) && negoUser) {
+          negoUser.nudgeOptOut = undefined;
+          touchUser(negoUser);
+        }
+        if (negoUser?.pendingAsk && negoUser.pendingAsk.kind !== "NUDGE") {
+          return nogoReply(`ⓘ Masih ada pertanyaan terbuka (${negoUser.pendingAsk.offerId || "negosiasi"}). Selesaikan atau "batalkan" dulu.`);
+        }
+        const pick = pickNudgeTarget(meFarmer.id);
+        if (!pick) return nogoReply(`ⓘ *${meFarmer.nama}* belum punya komoditas AKTIF.`);
+        const at = new Date().toISOString();
+        if (negoUser) {
+          negoUser.pendingAsk = { kind: "NUDGE", offerId: "", ts: at, nudge: { komoditasId: pick.kmd.id, field: "harga" } };
+          touchUser(negoUser);
+        }
+        return nogoReply(pick.text.trimStart());
+      }
+      // F6: tangani jawaban sodoran. Return string = tangani; null = bukan
+      // jawaban -> panggil-callback melepas & meloloskan sebagai obrolan biasa.
+      const handleNudgeAnswer = (): string | null => {
+        if (!meFarmer || !negoUser) return "ⓘ Nomor ini tidak terdaftar sebagai petani.";
+        const t = lowerN.trim();
+        if (/stop|berhenti|jangan tanya|jangan ganggu|brisik|berisik|ganggu/.test(t)) {
+          negoUser.nudgeOptOut = true;
+          clearAsk();
+          touchUser(negoUser);
+          return "Siap, dimengerti. Saya tidak akan tanya-tanya proaktif lagi. 🙏\n(Ketik \"minta pengingat\" kapan pun bila berubah pikiran.)";
+        }
+        if (/^(skip|lewati|nanti|sudah|belum|tidak|gak|nggak)\b/.test(t) && !/\d/.test(t)) {
+          clearAsk();
+          return "Siap, lain kali saja. 👍";
+        }
+        const nx = negoUser?.pendingAsk?.nudge;
+        const kmd = nx ? komoditasDb.find((k) => k.id === nx.komoditasId) : undefined;
+        if (!kmd) { clearAsk(); return null; }
+        const saySama = /^(masih\s+)?sama(\s|$|[.,!])/.test(t);
+        const price = saySama ? Number(kmd.hargaMintaPerKg) || 0 : parseRpPerKg(String(message || ""));
+        if (price === undefined || !(price > 0)) {
+          if (saySama) {
+            return `ⓘ Belum ada harga *${kmd.komoditas}* yang tercatat — balas angkanya, mis. "8000".`;
+          }
+          return null;
+        }
+        const nowP = new Date().toISOString();
+        kmd.hargaMintaPerKg = price;
+        kmd.hargaMintaAt = nowP;
+        kmd.updatedAt = nowP;
+        saveKomoditasToDisk();
+        // Teruskan ke penawaran OPEN yang menunggu harga petani ini.
+        const applied: string[] = [];
+        for (const o of offersDb) {
+          if (o.status !== "OPEN" && o.status !== "SEBAGIAN") continue;
+          if (!komMatch(o.komoditas, kmd.komoditas)) continue;
+          const ln = o.lines.find((l) => l.farmerId === meFarmer!.id && !Number(l.hargaPetaniPerKg));
+          if (!ln) continue;
+          ln.hargaPetaniPerKg = price;
+          ln.hargaAt = nowP;
+          evalOffer(o);
+          applied.push(o.id);
+        }
+        if (applied.length > 0) saveOffersToDisk();
+        clearAsk();
+        const base = saySama
+          ? `✅ Siap, harga *${kmd.komoditas}* tetap ${fmtRp(price)}/kg. Makasih update-nya! 🙏`
+          : `✅ Makasih! Harga jual *${kmd.komoditas}* tercatat: ${fmtRp(price)}/kg.`;
+        return applied.length > 0 ? `${base}\nDipakai juga untuk penawaran ${applied.join(", ")} yang menunggu.` : base;
+      };
+      // (1n) F6: jawaban sodoran lebih dulu (longgar — tak berpola dilepas).
+      {
+        const paN = negoUser?.pendingAsk;
+        const msgN = String(message || "");
+        const EXN = /cek penawaran|status penawaran|info penawaran|penawaran saya|^\s*batal\s+OFR|^\s*OFR-\d+\s*$|komoditas saya|^\s*bantuan\s*$/i;
+        const STN = /\b(stok|ready|siap|tersedia)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
+        const DMN = /\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
+        if (paN && paN.kind === "NUDGE" && !EXN.test(msgN) && !STN.test(msgN) && !DMN.test(msgN)) {
+          const nres = handleNudgeAnswer();
+          if (nres) return nogoReply(nres);
+          clearAsk();
+        }
+      }
+
+      // (1) Jawaban pendingAsk. Perintah eksplisit (cek/batal/daftar/stok/
+      // demand baru) lolos agar user tak terjebak tak bisa cek status atau
+      // lapor stok saat menunggu (jebakan OFR basi, 31 Okt 2026).
+      const pa = negoUser?.pendingAsk;
+      const EXPLICIT_RE = /cek penawaran|status penawaran|info penawaran|penawaran saya|^\s*batal\s+OFR|^\s*OFR-\d+\s*$|komoditas saya|^\s*bantuan\s*$/i;
+      const STOCKCMD_RE = /\b(stok|ready|siap|tersedia)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
+      const DEMANDCMD_RE = /\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
+      const msgStr = String(message || "");
+      if (pa && (pa.kind === "HARGA_JUAL" || pa.kind === "BUDGET" || pa.kind === "KONFIRM_DEAL") && !EXPLICIT_RE.test(msgStr) && !STOCKCMD_RE.test(msgStr) && !DEMANDCMD_RE.test(msgStr)) {
+        const o = offersDb.find((x) => x.id === pa.offerId && x.status !== "DEAL" && x.status !== "BATAL");
+        if (!o) {
+          clearAsk();
+        } else if (pa.kind === "KONFIRM_DEAL") {
+          if (/deal oke|oke deal|^\s*deal\s*$|^\s*oke\s*$/i.test(String(message || ""))) {
+            if (o.status !== "COCOK") {
+              return nogoReply(`ⓘ ${o.id} belum COCOK (status: ${o.status}). Ketik "cek penawaran" untuk update.`);
+            }
+            return nogoReply(doDeal(o), ["Cek Penawaran", "Cek Harga Pasar Hari Ini"]);
+          }
+          const raise = /budget/.test(lowerN) ? parseRpPerKg(String(message || "")) : undefined;
+          if (raise !== undefined) {
+            clearAsk();
+            return nogoReply(doBudget(o, raise));
+          }
+          if (!/^\s*batal/i.test(String(message || ""))) {
+            return nogoReply(`ⓘ Balas *"deal oke"* untuk konfirmasi ${o.id}, atau *"batal ${o.id}"* untuk membatalkan.`);
+          }
+        } else {
+          const price = parseRpPerKg(String(message || ""));
+          if (price === undefined) {
+            return nogoReply(pa.kind === "HARGA_JUAL"
+              ? `ⓘ Balas angka harga saja, mis. "8000" atau "8,5rb per kg".`
+              : `ⓘ Balas angka budget saja, mis. "8000" atau "8,5rb per kg".`);
+          }
+          clearAsk();
+          if (pa.kind === "HARGA_JUAL") {
+            if (!meFarmer) return nogoReply(`ⓘ Nomor ini tidak terdaftar sebagai petani.`);
+            return nogoReply(doFarmerPrice(o, price));
+          }
+          return nogoReply(doBudget(o, price));
+        }
+      }
+
+      // (2) Cek / batal penawaran.
+      const mStatusId = lowerN.match(/\bOFR-(\d+)\b/i);
+      if (/cek penawaran|status penawaran|info penawaran|penawaran saya/.test(lowerN)
+        || (mStatusId && /status|cek|info/.test(lowerN)) || /^\s*OFR-\d+\s*$/i.test(String(message || ""))) {
+        let o: Offer | undefined;
+        if (mStatusId) o = offersDb.find((x) => x.id.toUpperCase() === mStatusId[0].toUpperCase());
+        if (!o) o = myOpenOffer(true) || myOpenOffer(false);
+        if (!o) {
+          const last = [...offersDb].reverse().find((x) => normalizePhone(x.buyerPhone) === mePhone
+            || (!!meFarmer && x.lines.some((l) => l.farmerId === meFarmer!.id)));
+          if (!last) {
+            return nogoReply(`ⓘ Belum ada penawaran. Buyer: "butuh <komoditas> <qty>" (mis. "butuh kentang 2 ton").\nPetani: laporkan stok via "stok <komoditas> <qty>".`);
+          }
+          return nogoReply(offerStatusText(last, normalizePhone(last.buyerPhone) === mePhone ? "buyer" : "farmer"));
+        }
+        return nogoReply(offerStatusText(o, normalizePhone(o.buyerPhone) === mePhone ? "buyer" : "farmer"));
+      }
+      const mBatal = String(message || "").match(/^\s*batal\s+(OFR-\d+)\s*$/i);
+      if (mBatal) {
+        const o = offersDb.find((x) => x.id.toUpperCase() === mBatal[1].toUpperCase());
+        if (!o) return nogoReply(`ⓘ ${mBatal[1].toUpperCase()} tidak ditemukan.`);
+        const mine = normalizePhone(o.buyerPhone) === mePhone
+          || (!!meFarmer && o.lines.some((l) => l.farmerId === meFarmer!.id)) || isAdmin;
+        if (!mine) return nogoReply(`ⓘ Hanya buyer/petani terkait atau admin yang bisa membatalkan ${o.id}.`);
+        if (o.status === "DEAL") return nogoReply(`ⓘ ${o.id} sudah DEAL — tak bisa dibatalkan via chat. Hubungi admin.`);
+        o.status = "BATAL";
+        o.updatedAt = new Date().toISOString();
+        saveOffersToDisk();
+        clearOfferAsks(o.id);
+        emitCanonicalEvent({
+          source: "wa-chat", entity: "offer", entityId: o.id,
+          action: "cancel", actor: mePhone, payload: { status: "BATAL" },
+        });
+        return nogoReply(`✅ ${o.id} dibatalkan.`);
+      }
+
+      // (3) Demand buyer baru ("butuh kentang 2 ton"). Saprodi lolos ke ERP.
+      const SAPRODI_RE = /urea|npk|pupuk|pestisida|herbisida|fungisida|insektisida|\bobat\b|benih|bibit|alsintan|traktor/;
+      const mNeed = lowerN.match(/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b\s+(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:ton|kuintal|kwintal|kilogram|kg|kilo))\b/i);
+      if (mNeed) {
+        const kom = String(mNeed[2] || "").replace(/\b(di|ke|dari|untuk|dong|ya|nih)\b/gi, " ").replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
+        const qty = parseQtyKg(mNeed[3] || "");
+        if (kom.length >= 3 && qty !== undefined && !SAPRODI_RE.test(kom)) {
+          const now = new Date().toISOString();
+          const cands = findStockCandidates(kom);
+          const reuse = offersDb.find((x) => x.status !== "DEAL" && x.status !== "BATAL"
+            && normalizePhone(x.buyerPhone) === mePhone && komMatch(x.komoditas, kom));
+          if (reuse) {
+            reuse.qtyKg = qty;
+            for (const k of cands.slice(0, 10)) {
+              const ln = reuse.lines.find((l) => l.farmerId === k.farmerId);
+              if (ln) { ln.stokKg = Math.round(Number(k.stokSiapJualTon) * 1000); ln.komoditasId = k.id; }
+              else reuse.lines.push({ farmerId: k.farmerId, komoditasId: k.id, stokKg: Math.round(Number(k.stokSiapJualTon) * 1000) });
+            }
+            const ev = evalOffer(reuse);
+            saveOffersToDisk();
+            if (!Number(reuse.budgetPerKg) && negoUser) setAsk(negoUser, "BUDGET", reuse.id);
+            return nogoReply(`🤝 *${reuse.id} diperbarui:* butuh *${kom}* ${fmtKg(qty)}.\n\n${stockListText(cands, kom, qty)}\n\n` +
+              (Number(reuse.budgetPerKg) ? composeBuyerFit(reuse, ev) : `💰 *Budget Anda berapa per kg?* Balas mis. "budget 8000".`),
+              ["Cek Penawaran"]);
+          }
+          const o: Offer = {
+            id: nextId("OFR", offersDb.map((x) => x.id)),
+            buyerPhone: mePhone,
+            komoditas: kom,
+            qtyKg: qty,
+            status: "OPEN",
+            lines: [],
+            createdAt: now,
+            updatedAt: now,
+          };
+          for (const k of cands.slice(0, 10)) {
+            o.lines.push({ farmerId: k.farmerId, komoditasId: k.id, stokKg: Math.round(Number(k.stokSiapJualTon) * 1000) });
+          }
+          offersDb.push(o);
+          saveOffersToDisk();
+          emitCanonicalEvent({
+            source: "wa-chat", entity: "offer", entityId: o.id,
+            action: "create", actor: mePhone,
+            payload: { komoditas: kom, qtyKg: qty, kandidat: o.lines.length },
+          });
+          if (negoUser) setAsk(negoUser, "BUDGET", o.id);
+          return nogoReply(
+            `🤝 *Permintaan dicatat: ${o.id}*\nButuh *${kom}* ${fmtKg(qty)}.\n\n${stockListText(cands, kom, qty)}\n\n💰 *Budget Anda berapa per kg?* Balas mis. "budget 8000".`,
+            ["Cek Penawaran"]);
+        }
+      }
+
+      // (4) Lapor stok petani ("stok kentang 1,3 ton"). Bukan KMD-nya -> lolos
+      // ke ERP/estimasi. Nol eksplisit ("stok X 0 kg") = kosongkan stok.
+      if (meFarmer && /\b(stok|ready|siap|tersedia|ada)\b/.test(lowerN)) {
+        const mQty = lowerN.match(/(\d+(?:[.,]\d+)?)\s*(ton|kuintal|kwintal|kilogram|kg|kilo|t\b|kw\b)/i);
+        if (mQty) {
+          const rawV = Number(mQty[1].replace(/\./g, "").replace(/,/g, "."));
+          const uu = mQty[2].toLowerCase();
+          const mult = (uu.startsWith("ton") || uu === "t") ? 1000 : (uu.startsWith("ku") || uu.startsWith("kw")) ? 100 : 1;
+          const qtyKg = Number.isFinite(rawV) && rawV >= 0 ? rawV * mult : NaN;
+          const cleaned = lowerN
+            .replace(/\b(stok|ready|siap|tersedia|ada|panen|hasil|jual|harga|rp|rupiah|per|kg|ton|kuintal|kwintal|kilo|dong|ya|nih)\b/gi, " ")
+            .replace(/[\d.,]+\s*(rb|ribu)?/gi, " ")
+            .replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
+          const rows = komoditasDb.filter((k) => k.farmerId === meFarmer!.id && (k.status === "AKTIF" || k.status === "PANEN"));
+          const target = [...rows].reverse().find((k) => komMatch(k.komoditas, cleaned));
+          if (target && Number.isFinite(qtyKg)) {
+            const nowS = new Date().toISOString();
+            target.stokSiapJualTon = qtyKg / 1000;
+            target.stokUpdatedAt = nowS;
+            target.updatedAt = nowS;
+            const inlinePrice = /(harga|jual|minta|tawar)/.test(lowerN) ? parseRpPerKg(String(message || "")) : undefined;
+            if (inlinePrice !== undefined) {
+              target.hargaMintaPerKg = inlinePrice;
+              target.hargaMintaAt = nowS;
+            }
+            saveKomoditasToDisk();
+            emitCanonicalEvent({
+              source: "wa-chat", entity: "commodity", entityId: target.id,
+              action: "update", actor: mePhone,
+              payload: { farmerId: target.farmerId, komoditas: target.komoditas, stokSiapJualTon: target.stokSiapJualTon },
+            });
+            const opens = offersDb.filter((o) => (o.status === "OPEN" || o.status === "SEBAGIAN") && komMatch(o.komoditas, target.komoditas));
+            for (const o of opens) {
+              let ln = o.lines.find((l) => l.farmerId === meFarmer!.id);
+              if (!ln) {
+                ln = { farmerId: meFarmer!.id, komoditasId: target.id, stokKg: Math.round(qtyKg) };
+                o.lines.push(ln);
+              } else {
+                ln.stokKg = Math.round(qtyKg);
+                ln.komoditasId = target.id;
+              }
+              if (inlinePrice !== undefined) {
+                ln.hargaPetaniPerKg = inlinePrice;
+                ln.hargaAt = nowS;
+              }
+              evalOffer(o);
+              o.updatedAt = nowS;
+            }
+            if (opens.length > 0) saveOffersToDisk();
+            // Tanya harga untuk penawaran TERBARU yang belum berharga (basi diabaikan).
+            const askPriceFor = inlinePrice === undefined
+              ? [...opens].reverse().find((o) => {
+                const ln = o.lines.find((l) => l.farmerId === meFarmer!.id);
+                return ln && !Number(ln.hargaPetaniPerKg);
+              })
+              : undefined;
+            if (askPriceFor && negoUser) setAsk(negoUser, "HARGA_JUAL", askPriceFor.id);
+            let replyT = `✅ Stok *${target.komoditas}* tercatat: siap ${fmtKg(qtyKg)} (${target.id}).`;
+            if (opens.length > 0) {
+              const o0 = opens[opens.length - 1];
+              replyT += `\n\nAda buyer butuh ${fmtKg(Number(o0.qtyKg))} (${o0.id}).` +
+                (inlinePrice !== undefined
+                  ? ` Harga ${fmtRp(inlinePrice)}/kg tercatat — ${Number(o0.budgetPerKg) ? `status penawaran: ${o0.status}.` : "menunggu budget buyer."}`
+                  : ` *Mau jual harga berapa per kg?*`);
+            } else {
+              replyT += `\n\nBelum ada buyer yang butuh — stok ini otomatis terlihat saat ada permintaan.`;
+            }
+            return nogoReply(replyT, ["Cek Penawaran"]);
+          }
+        }
+      }
+
+      // (5) Harga jual petani tanpa pending ("jual kentang 8000/kg"). Butuh
+      // kata jual eksplisit + offer terbuka; catatan "terjual/laku" milik ERP.
+      if (meFarmer && !isAdmin && /(jual|tawar|minta|lepas)/.test(lowerN) && !/terjual|laku|\bkas\b|catat|\bhpp\b|terima|transfer/.test(lowerN)) {
+        const price = parseRpPerKg(String(message || ""));
+        if (price !== undefined) {
+          const o = myOpenOffer(false);
+          if (o) return nogoReply(doFarmerPrice(o, price));
+        }
+      }
+
+      // (6) Budget buyer ("budget 8000"). Tanpa offer terbuka -> lolos.
+      {
+        const oB = myOpenOffer(true);
+        if (oB && /\bbudget\b/.test(lowerN)) {
+          const price = parseRpPerKg(String(message || ""));
+          if (price === undefined) return nogoReply(`ⓘ Budget berapa per kg? Balas mis. "budget 8000".`);
+          clearAsk();
+          return nogoReply(doBudget(oB, price));
+        }
+      }
+
+      // (7) Konfirmasi deal eksplisit ("deal oke").
+      if (/^\s*(deal oke|oke deal|deal|acc deal)\s*$/i.test(String(message || ""))) {
+        const o = offersDb.filter((x) => x.status === "COCOK" && normalizePhone(x.buyerPhone) === mePhone).pop();
+        if (!o) return nogoReply(`ⓘ Tidak ada penawaran COCOK milik Anda. Ketik "cek penawaran".`);
+        return nogoReply(doDeal(o), ["Cek Penawaran", "Cek Harga Pasar Hari Ini"]);
+      }
+    }
+
+    // 0c-feedback (F7). Saran/komplain eksplisit ("saran: ...") + keluhan
+    // implisit (kata komplain + rujukan bot) -> catat FDB + cermin Sheets.
+    // SEBELUM cabang ERP/harga/estimasi/LLM. Admin: "lihat saran".
+    {
+      const msgF = String(message || "");
+      const lowerF = msgF.toLowerCase();
+      const mExp = msgF.match(/^\s*(saran|masukan|kritik|usulan|keluhan|komplain|lapor)\s*[:\s]+(.{3,500})\s*$/is);
+      const mImpl = !mExp
+        && /(kecewa|ngawur|bodoh|jelek|buruk|payah|lemot|lambat|error|gagal|tidak membantu|nggak membantu|ngga membantu|bohong|sesat|salah(?! ketik| sambung| nomor))\b/.test(lowerF)
+        && /(kamu|kau|bot|ai\b|jawab|aplikasi|hai tani|kang tani|sistem)/.test(lowerF);
+      if (mExp || mImpl) {
+        const kat: FeedbackKategori = mExp && /keluhan|komplain|lapor/i.test(mExp[1]) ? "KOMPLAIN" : mExp ? "SARAN" : "KOMPLAIN";
+        const pesan = mExp ? mExp[2] : msgF;
+        const rec = logFeedback(String(effPhone || senderPhone || ""), kat, pesan, "via-chat");
+        return res.json({
+          reply: kat === "KOMPLAIN"
+            ? `🙏 Maaf atas ketidaknyamanannya. Keluhan Anda sudah saya catat (\`${rec.id}\`) untuk perbaikan Hai Tani.`
+            : `🙏 Makasih sarannya! Sudah saya catat (\`${rec.id}\`) untuk pengembangan Hai Tani.`,
+          quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "Lihat Saran"] : ["Cek Harga Pasar Hari Ini", "Bantuan"],
+          extracted: {}, isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+        } as any);
+      }
+      if (isAdmin && /^\s*lihat (saran|masukan|keluhan|komplain|feedback)\s*$/i.test(msgF)) {
+        const rows = feedbackDb.slice(0, 5);
+        if (rows.length === 0) {
+          return res.json({
+            reply: "📭 Belum ada saran/masukan yang tercatat.",
+            quickReplies: ["📊 Rekap Semua Petani"], extracted: {},
+            isComplete: true, isAdminAction: true, aiProvider: "rule_based",
+          } as any);
+        }
+        const list = rows.map((f) => `• \`${f.id}\` [${f.kategori}] ${f.nama || maskPhone(f.phone)}: ${f.pesan.slice(0, 80)}`).join("\n");
+        return res.json({
+          reply: `📬 *Saran & Masukan terbaru:*\n${list}`,
+          quickReplies: ["📊 Rekap Semua Petani"], extracted: {},
+          isComplete: true, isAdminAction: true, aiProvider: "rule_based",
+        } as any);
+      }
+    }
+
+    // 0a-benefit. Pertanyaan manfaat/program ("apa benefit setelah terdaftar?",
+    // "jelaskan program hai tani"): jawab deterministik dari daftar manfaat
+    // resmi (terverifikasi sesuai kemampuan terkirim) — JANGAN templat draf.
+    {
+      const lowerB = (message || "").toLowerCase();
+      const benefitWords = /\bmanfaat\b|\bbenefit\b|\bkeuntungan\b|\bkegunaan\b/.test(lowerB);
+      const programWords = /\bprogram\b|\btentang\b|apa itu|itu apa/.test(lowerB);
+      const taniWords = /tani|hai|kang|bot|aplikasi|daftar/.test(lowerB);
+      const agroWords = /pupuk|hama|wereng|ulat|tikus|penyakit|dosis|tanaman|padi|cabai|bawang|jagung|sawah|lahan/.test(lowerB);
+      const benefitHit = (benefitWords && !(agroWords && !taniWords)) || (programWords && taniWords);
+      if (benefitHit) {
+        const reply = isAdmin
+          ? `🌾 *Hai Tani / Kang Tani AI untuk Dinas & PPL:*\n\n` +
+            `• 📝 *Pendataan petani via WA* — admin daftarkan petani (teks/voice note), otomatis tersimpan & terverifikasi\n` +
+            `• 💹 *Harga pasar LIVE 2 sumber (SISKAPERBAPO + Mantung)* — monitoring per-pasar & per-komoditas untuk stabilisasi\n` +
+            `• 📊 *Rekap & agregasi real-time* — total petani, luas, proyeksi panen, sebaran komoditas\n` +
+            `• ✅ *Verifikasi & anomali* — daftar belum verifikasi, deteksi anomali harga\n` +
+            `• 📣 *Draf broadcast* — siapkan pesan hama/panen untuk petani\n` +
+            `• 🧾 *Kas/stok/HPP kios* — catat kas, stok, hitung HPP via chat\n` +
+            `• 🛡️ *Data jujur* — estimasi hanya dari petani, duplikat dicek via no HP\n` +
+            `• 📥 *Ekspor data* — unduh CSV untuk arsip dinas`
+          : `🌾 *Kenapa daftar di Hai Tani (Kang Tani AI)?*\n\n` +
+            `• 📝 *Pendaftaran lahan mudah* — cukup chat/voice note/foto: nama, komoditas, luas, lokasi. Tercatat resmi & terverifikasi dinas\n` +
+            `• 💹 *Harga pasar LIVE 2 sumber (SISKAPERBAPO Jatim per-pasar + Mantung Malang)* — bandingkan harga sebelum jual agar dapat harga terbaik dari buyer\n` +
+            `• 🐛 *Konsultasi hama & penyakit* — sebutkan gejala, dapat saran penanganan\n` +
+            `• 🧪 *Takaran pupuk tepat* — dosis urea/NPK per hektar sesuai komoditas\n` +
+            `• 📊 *Status lahan tercatat* — data, luas & riwayat panen rapi dalam satu tempat\n` +
+            `• 🛡️ *Data tidak dikarang* — yang kosong tetap kosong sampai Anda mengisi\n` +
+            `• 🎙️ *Bisa teks, voice note, & foto* — kirim foto tanaman untuk dinilai kondisinya\n\n` +
+            `Ketik *daftar* untuk mulai, atau *cek harga <komoditas>* untuk harga hari ini.`;
+        return res.json({
+          reply,
+          quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "Daftarkan Petani"] : ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini"],
+          extracted: currentDraft || {}, isComplete: false, isAdminAction: isAdmin, aiProvider: "rule_based",
+        } as any);
+      }
+    }
+
+    // 0a-est. Susulan estimasi panen/hasil ("panen Desember 2026", "hasil 8 ton").
+    // Aturan: estimasi HANYA dari user — perintah ini mengisi yang kosong kapan saja.
+    {
+      const regU = extractFarmerFromText(message, {});
+      const hasEst = !!(regU.extracted.estimasiPanen || regU.extracted.estimasiHasilTon);
+      const hasOther = !!(regU.extracted.nama || regU.extracted.komoditas || regU.extracted.luasLahan || regU.extracted.kabupaten || regU.extracted.alamat || regU.extracted.noHp);
+      const erpish = /stok|kios|gudang|jual|beli|\bkas\b|catat|hpp|tambah stok|kurang/.test((message || "").toLowerCase());
+      if (hasEst && !hasOther && !erpish && /panen|hasil|ton|kuintal|kwintal|\bkg\b/.test((message || "").toLowerCase()) && !needsReasoningMsg(message)) {
+        const idM = String(message || "").match(/TANI-\d+/i);
+        const target = isAdmin && idM
+          ? farmersDb.find((f) => f.id.toUpperCase() === idM[0].toUpperCase())
+          : farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(effPhone));
+        if (!target) {
+          return res.json({
+            reply: isAdmin && !idM
+              ? `Sebutkan ID petani-nya, mis. "update panen TANI-013 Desember 2026".`
+              : "Nomor ini belum terdaftar sebagai petani. Ketik *daftar* untuk mendaftar dulu.",
+            quickReplies: isAdmin ? ["📊 Rekap Semua Petani"] : ["Daftarkan Lahan Saya"],
+            extracted: currentDraft || {}, isComplete: false, isAdminAction: isAdmin, aiProvider: "rule_based",
+          } as any);
+        }
+        const before = `panen: ${target.estimasiPanen || "-"}, hasil: ${Number(target.estimasiHasilTon) > 0 ? target.estimasiHasilTon + " Ton" : "-"}`;
+        if (regU.extracted.estimasiPanen) target.estimasiPanen = regU.extracted.estimasiPanen;
+        if (regU.extracted.estimasiHasilTon) target.estimasiHasilTon = Number(regU.extracted.estimasiHasilTon);
+        saveFarmersToDisk();
+        bumpDataVersion();
+        enqueueSheetSync("farmer", target.id);
+        // F2: susulan estimasi juga memperkaya baris KMD AKTIF terbaru.
+        enrichLatestCommodity(target.id, {
+          estimasiPanen: regU.extracted.estimasiPanen,
+          estimasiHasilTon: Number(regU.extracted.estimasiHasilTon) || undefined,
+        });
+        const after = `panen: ${target.estimasiPanen || "-"}, hasil: ${Number(target.estimasiHasilTon) > 0 ? target.estimasiHasilTon + " Ton" : "-"}`;
+        return res.json({
+          reply: `✅ *Estimasi ${target.nama} (${target.id}) diperbarui.*\n• Sebelum: ${before}\n• Sesudah: ${after}`,
+          quickReplies: isAdmin ? ["📊 Rekap Semua Petani"] : ["Cek Harga Pasar Hari Ini"],
+          extracted: {}, isComplete: true, isAdminAction: isAdmin, aiProvider: "rule_based",
+        } as any);
+      }
+    }
+
+    // 0a-data. "Lihat Data Saya" (pengganti tombol "Buka Database Google Sheets"
+    // yang tak punya handler dan memicu halusinasi LLM).
+    if (/^📊?\s*lihat data saya\s*[!.\s]*$/i.test(message || "")) {
+      if (isAdmin) {
+        const total = farmersDb.length;
+        const luas = farmersDb.reduce((s, f) => s + (Number(f.luasLahan) || 0), 0);
+        const unver = farmersDb.filter((f) => f.statusVerifikasi !== "Terverifikasi").length;
+        return res.json({
+          reply: `📊 *Rekap Database Petani*\n• Total: *${total} petani*\n• Luas: *${luas.toFixed(1)} Ha*\n• Belum verifikasi: *${unver} petani*\n\nKetik "rekap semua petani" untuk detail, atau buka tab Dashboard.`,
+          quickReplies: ["📊 Rekap Semua Petani", "Daftarkan Petani"],
+          extracted: {}, isComplete: false, isAdminAction: true, aiProvider: "rule_based",
+        });
+      }
+      const me = resolveChatFarmer(effPhone, message);
+      if (!me) {
+        return res.json({
+          reply: "Nomor ini belum terdaftar sebagai petani. Ketik *daftar* untuk mendaftarkan lahan Anda.",
+          quickReplies: ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini"],
+          extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based",
+        });
+      }
+      return res.json({
+        reply: `🌾 *Data ${me.nama}* (${me.id}):\n• Komoditas: ${me.komoditas}${me.varietas ? ` (${me.varietas})` : ""}\n• Luas: ${me.luasLahanFormatted}\n• Lokasi: ${me.kabupaten || me.alamat}\n• Panen: ${me.estimasiPanen || "Belum diisi"}${Number(me.estimasiHasilTon) > 0 ? ` (~${me.estimasiHasilTon} Ton)` : ""}\n• Verifikasi: ${me.statusVerifikasi}`,
+        quickReplies: ["Cek Harga Pasar Hari Ini", "Konsultasi Hama Tanaman"],
+        extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based",
+      });
     }
 
     // 0a0. ERP Kas/Stok/HPP intent (deterministik, semua provider AI). Regex dulu
@@ -5324,6 +7725,36 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           extracted: {}, isComplete: true, isAdminAction: isAdmin, clearFarmerDraft: true, aiProvider: "rule_based",
         } as any);
       }
+      // Konfirmasi duplikat (aturan user): nomor sama -> tanya Ya/Tidak dulu.
+      const pendingId = (currentDraft as any)?._pendingUpdate;
+      if (pendingId) {
+        const pendExisting = farmersDb.find((f) => f.id === pendingId);
+        const sayYes = /^\s*(ya|iya|iyaa+|y|oke|ok|okay|siap|setuju|update|baik|deal)\s*[!.\s]*$/i.test(message || "") || /^\s*ya,?\s*(update|perbarui|ganti)\b/i.test(message || "");
+        const sayNo = /tidak|nggak|ngga|enggak|gak\b|jangan|tunda|nanti|ora\b|batal/i.test(message || "");
+        if (sayYes && pendExisting) {
+          const { _pendingUpdate, ...restPending } = currentDraft || {};
+          const rec = saveFarmerRecord(restPending, isAdmin ? activeAdmin : undefined, effPhone);
+          return res.json({
+            reply: formatSuccessFarmerRegistration(rec, isAdmin ? activeAdmin : undefined) + `\n\n_Data ${pendExisting.id} diperbarui sesuai jawaban._`,
+            quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "Daftarkan Petani"] : ["Cek Harga Pasar Hari Ini", "Daftarkan Lahan Lain"],
+            extracted: {}, isComplete: true, savedRecord: rec, isAdminAction: isAdmin, clearFarmerDraft: true, aiProvider: "rule_based",
+          } as any);
+        }
+        if (sayNo || !pendExisting) {
+          return res.json({
+            reply: pendExisting
+              ? "Baik, data baru dibatalkan. Data lama tetap utuh.\n_Bila ini orang berbeda, daftarkan dengan nomor HP/WA yang berbeda._"
+              : "Data acuan pembanding sudah tidak ada; draf dibatalkan. Ketik *daftar* untuk mengulang.",
+            quickReplies: isAdmin ? ["📊 Rekap Semua Petani", "Daftarkan Petani"] : ["Daftarkan Lahan Saya", "Cek Harga Pasar Hari Ini"],
+            extracted: {}, isComplete: true, isAdminAction: isAdmin, clearFarmerDraft: true, aiProvider: "rule_based",
+          } as any);
+        }
+        return res.json({
+          reply: formatDuplicateAskPrompt(pendExisting, currentDraft) + `\n\n_Balas Ya/Tidak._`,
+          quickReplies: ["Ya, update", "Tidak"],
+          extracted: currentDraft, isComplete: false, isAdminAction: isAdmin, aiProvider: "rule_based",
+        } as any);
+      }
       const lwr = (message || "").toLowerCase();
       const hasNewIntent =
         detectErpIntent(lwr, null) || isSupplierIntent(message) ||
@@ -5336,6 +7767,14 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         const check = checkFarmerCompleteness(merged);
         const needFarmerPhone = isAdmin && !merged.noHp;
         if (check.isComplete && !needFarmerPhone) {
+          const dup0d = findDuplicateFarmerByPhone(merged, isAdmin ? activeAdmin : undefined, effPhone);
+          if (dup0d) {
+            return res.json({
+              reply: formatDuplicateAskPrompt(dup0d, merged),
+              quickReplies: ["Ya, update", "Tidak"],
+              extracted: { ...merged, _pendingUpdate: dup0d.id }, isComplete: false, isAdminAction: isAdmin, aiProvider: "rule_based",
+            } as any);
+          }
           const rec = saveFarmerRecord(merged, isAdmin ? activeAdmin : undefined, effPhone);
           return res.json({
             reply: formatSuccessFarmerRegistration(rec),
@@ -5482,18 +7921,48 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 1. Jawab secara ringkas, to the point, padat informasi (maksimal 2-3 paragraf pendek atau poin WhatsApp).
 2. Jika admin mencari petani atau komoditas tertentu, jelaskan data spesifik yang diminta tanpa membeberkan seluruh database.
 3. Jika admin meminta draft pesan broadcast WhatsApp, berikan teks siap kirim yang bernas.
-4. Format output JSON WAJIB:
+4. JANGAN sebut angka harga/Rp spesifik dari konteks (data pasar di konteks bisa basi); untuk info harga, arahkan admin bertanya "cek harga <komoditas>" agar diambil live dari SISKAPERBAPO.
+5. Jika tidak mengetahui jawabannya, jawab jujur persis: "Maaf, saya belum mengetahui hal ini. Terima kasih, ini akan menjadi bahan pengembangan Hai Tani." — jangan mengarang.
+6. Format output JSON WAJIB:
 {
   "reply": "Pesan balasan profesional untuk Admin dalam format WhatsApp (*bold*, bullet points, emojis)",
   "quickReplies": ["3 tombol aksi cepat yang relevan"],
   "isAdminAction": true
 }`;
 
-      let aiResult: { text: string; provider: "9router" | "gemini" | "meta"; model: string } | null = null;
+      let aiResult: { text: string; provider: "9router" | "gemini" | "meta" | "nim"; model: string } | null = null;
       try {
         const regPre = extractFarmerFromText(message, currentDraft || {});
         if (isDeterministicFarmerData(message, !!regPre.hasMinimumData)) {
           console.log("[Admin Chat] bypass LLM: data/pendaftaran petani -> deterministik.");
+        } else if (!sessAdm && fwdOk && waOutboundConfig().token) {
+          // F5: WA berpacu — ack <8 dtk, jawaban asli susulan langsung.
+          const p = callUniversalAI(adminSystemInstructions, message, history, { maxOutputTokens: 550, timeoutMs: ACK_BG_CAP_MS });
+          const w = await Promise.race([
+            p.then(
+              (v) => ({ tag: "fast" as const, v }),
+              (e) => ({ tag: "err" as const, e }),
+            ),
+            sleepMs(ACK_AFTER_MS).then(() => ({ tag: "ack" as const })),
+          ]);
+          if (w.tag === "fast") {
+            aiResult = w.v;
+          } else if (w.tag === "ack") {
+            console.log(`[Ack] admin ${maskPhone(effPhone || senderPhone)} >${ACK_AFTER_MS}ms -> ack + susulan`);
+            emitCanonicalEvent({ source: "wa-chat", entity: "ack", entityId: `ack-${Date.now().toString(36)}`, action: "ack", actor: effPhone || senderPhone, payload: { kind: "admin" } });
+            deliverAckFollowup("admin", String(effPhone || senderPhone || ""), String(message || ""), p);
+            return res.json({
+              reply: ACK_TEXT,
+              quickReplies: ["📊 Rekapitulasi Lengkap", "Bantuan"],
+              extracted: currentDraft || {},
+              isComplete: true,
+              isAdminAction: true,
+              aiProvider: "ack_pending",
+              ackPending: true,
+            } as any);
+          } else {
+            throw w.e;
+          }
         } else {
           aiResult = await callUniversalAI(
             adminSystemInstructions,
@@ -5544,17 +8013,10 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
           parsed.aiModel = aiResult.model;
 
           const lowerAdminMsg = (message || "").toLowerCase();
-          const isAddRequest =
-            lowerAdminMsg.includes("tambah") ||
-            lowerAdminMsg.includes("daftarkan") ||
-            lowerAdminMsg.includes("daftar") ||
-            lowerAdminMsg.includes("input") ||
-            lowerAdminMsg.includes("masukkan") ||
-            lowerAdminMsg.includes("catat") ||
-            lowerAdminMsg.includes("simpan");
+          const isAddRequest = isAddRegex(lowerAdminMsg);
 
           const reg = extractFarmerFromText(message, currentDraft || {});
-          const merged = { ...(currentDraft || {}), ...(parsed.extracted || {}), ...(reg.extracted || {}) };
+          const merged = { ...(currentDraft || {}), ...scrubUnmentionedEstimates(parsed.extracted, message), ...(reg.extracted || {}) };
           const check = checkFarmerCompleteness(merged);
 
           // Tolak isComplete palsu: klaim lengkap tanpa satu pun field terisi = abaikan.
@@ -5562,15 +8024,24 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
           // Jaring pengaman: data petani yang lolos ke LLM (mis. dibalut pertanyaan)
           // tetap digabung ke draf; templat draf hanya dipaksa bila tak perlu nalar.
           const regHasAny = !!reg.hasMinimumData;
-          const wantsReasoning = /analisis|rekomendasi|prediksi|kenapa|mengapa|bagaimana|kapan|apakah|jelaskan|bandingkan|\?/.test(lowerAdminMsg);
+          const wantsReasoning = needsReasoningMsg(message);
           if ((isAddRequest || regHasAny) && !wantsReasoning || (parsed.isComplete && mergedHasAnyField)) {
             const needFarmerPhone = !merged.noHp;
             if (check.isComplete && !needFarmerPhone) {
-              const newRecord = saveFarmerRecord(merged, activeAdmin, activeAdmin.noHp);
-              parsed.savedRecord = newRecord;
-              parsed.extracted = newRecord;
-              parsed.isComplete = true;
-              parsed.reply = formatSuccessFarmerRegistration(newRecord, activeAdmin);
+              const dupAdmLlm = findDuplicateFarmerByPhone(merged, activeAdmin, activeAdmin.noHp);
+              if (dupAdmLlm) {
+                parsed.reply = formatDuplicateAskPrompt(dupAdmLlm, merged);
+                parsed.quickReplies = ["Ya, update", "Tidak"];
+                parsed.extracted = { ...merged, _pendingUpdate: dupAdmLlm.id };
+                parsed.isComplete = false;
+                delete parsed.savedRecord;
+              } else {
+                const newRecord = saveFarmerRecord(merged, activeAdmin, activeAdmin.noHp);
+                parsed.savedRecord = newRecord;
+                parsed.extracted = newRecord;
+                parsed.isComplete = true;
+                parsed.reply = formatSuccessFarmerRegistration(newRecord, activeAdmin);
+              }
             } else {
               // INCOMPLETE: DO NOT save to database! Ask for missing fields politely
               const incomplete = formatIncompleteFarmerPrompt(merged, activeAdmin.nama, true);
@@ -5593,7 +8064,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
           }
 
           // Cache non-mutating AI reply for future reuse (Pillar 3)
-          if (isCacheable && parsed?.reply && !parsed?.isComplete) {
+          if (isCacheable && parsed?.reply && !parsed?.isComplete && isCacheWorthyReply(parsed.reply)) {
             aiResponseCache.set(cacheKey, {
               reply: parsed.reply,
               quickReplies: parsed.quickReplies,
@@ -5642,10 +8113,13 @@ ${leanContext.marketHighlight ? `${leanContext.marketHighlight}\n` : ""}
 ${currentDraft && Object.keys(currentDraft).length > 0 ? `DRAFT DATA TERKUMPUL: ${JSON.stringify(currentDraft)}` : ""}
 
 BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
-1. Jawab ramah dan ringkas (maksimal 2 paragraf singkat WhatsApp).
-2. Langsung berikan solusi teknis atau data harga tanpa bertele-tele.
+1. Jawab ramah dan ringkas (maksimal 2 paragraf singkat WhatsApp; jawaban obat/hama memakai format aturan 5).
+2. Langsung berikan solusi teknis tanpa bertele-tele.
 3. Jika petani mendaftarkan lahan, gali data yang belum ada: Nama, No WA, Alamat, Luas Lahan (Ha), Komoditas, Estimasi Panen.
-4. Format output JSON:
+4. JANGAN sebut angka harga/Rp spesifik dari konteks (data pasar di konteks bisa basi); arahkan petani bertanya "cek harga <komoditas>" agar diambil live dari SISKAPERBAPO.
+5. REKOMENDASI OBAT/HAMA (format wajib): bila menyarankan pestisida/obat, SELALU dahulukan ALASAN sebelum nama produk, dengan TIGA subjudul persis ini SEBAGAI TEKS BIASA di dalam field "reply" (satu pesan WhatsApp utuh — JANGAN sebagai field JSON terpisah, JANGAN berhenti setelah kalimat pembuka): *Diagnosis:* (gejala->penyebab singkat); *Kenapa obat ini?* (bahan aktif + cara kerja + dosis anjuran label + kenapa cocok untuk kasus spesifik ini); *Rekomendasi:* (nama produk + cara pakai singkat). JANGAN sebut/mengarahkan ke toko tertentu. Bila tidak yakin diagnosisnya, katakan terus terang dan minta foto gejala atau detail tambahan.
+6. Jika tidak mengetahui jawabannya, jawab jujur persis: "Maaf, saya belum mengetahui hal ini. Terima kasih, ini akan menjadi bahan pengembangan Hai Tani." — jangan mengarang.
+7. Format output JSON:
 {
   "reply": "Pesan balasan ramah & padat gaya WhatsApp (*bold*, emoji)",
   "extracted": {
@@ -5686,6 +8160,14 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       // If user asks to add or provides farmer registration details
       if (isAddIntent) {
         if (check.isComplete) {
+          const dupNai = findDuplicateFarmerByPhone(extracted, undefined, effPhone);
+          if (dupNai) {
+            return res.json({
+              reply: formatDuplicateAskPrompt(dupNai, extracted),
+              quickReplies: ["Ya, update", "Tidak"],
+              extracted: { ...extracted, _pendingUpdate: dupNai.id }, isComplete: false, isAdminAction: false, aiProvider: "rule_based",
+            } as any);
+          }
           const newRecord = saveFarmerRecord(extracted, undefined, effPhone);
           return res.json({
             reply: formatSuccessFarmerRegistration(newRecord),
@@ -5747,11 +8229,64 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       });
     }
 
-    let aiResult: { text: string; provider: "9router" | "gemini" | "meta"; model: string } | null = null;
+    // Harga pasar live LANGSUNG untuk petani (cermin admin): tanpa ini, query
+    // harga jatuh ke LLM (~4-9 dtk) dan rawan diabort forwarder (kasus nyata:
+    // "Cek harga pasar" -> 499, balasan WA tidak terkirim sama sekali).
+    {
+      const lowerFarmerMsgTop = (message || "").toLowerCase();
+      const hasHargaWordTopF = /harga|anomali|inflasi/.test(lowerFarmerMsgTop);
+      const hasPasarPriceTopF =
+        /pasar/.test(lowerFarmerMsgTop) &&
+        (/berapa/.test(lowerFarmerMsgTop) || HARGA_ALIAS.some((a) => a.keys.some((k) => hargaKeyHit(lowerFarmerMsgTop, k))));
+      if (
+        (hasHargaWordTopF || hasPasarPriceTopF) &&
+        !/daftar|tambah|input|catat|simpan|masukkan/.test(lowerFarmerMsgTop)
+      ) {
+        const liveReplyTopF = await formatHargaPasarReply(message);
+        return res.json({
+          reply: liveReplyTopF,
+          extracted: {},
+          isComplete: false,
+          isAdminAction: false,
+          aiProvider: "rule_based",
+          quickReplies: ["Cek Harga Cabai Hari Ini", "Konsultasi Hama Tanaman", "Daftarkan Lahan Saya"],
+        });
+      }
+    }
+
+    let aiResult: { text: string; provider: "9router" | "gemini" | "meta" | "nim"; model: string } | null = null;
     try {
       const regPreF = extractFarmerFromText(message, currentDraft || {});
       if (isDeterministicFarmerData(message, !!regPreF.hasMinimumData)) {
         console.log("[Petani Chat] bypass LLM: data/pendaftaran petani -> deterministik.");
+      } else if (!sessAdm && fwdOk && waOutboundConfig().token) {
+        // F5: WA berpacu — ack <8 dtk, jawaban asli susulan langsung.
+        const p = callUniversalAI(systemInstructions, message, history, { maxOutputTokens: 550, timeoutMs: ACK_BG_CAP_MS });
+        const w = await Promise.race([
+          p.then(
+            (v) => ({ tag: "fast" as const, v }),
+            (e) => ({ tag: "err" as const, e }),
+          ),
+          sleepMs(ACK_AFTER_MS).then(() => ({ tag: "ack" as const })),
+        ]);
+        if (w.tag === "fast") {
+          aiResult = w.v;
+        } else if (w.tag === "ack") {
+          console.log(`[Ack] petani ${maskPhone(effPhone || senderPhone)} >${ACK_AFTER_MS}ms -> ack + susulan`);
+          emitCanonicalEvent({ source: "wa-chat", entity: "ack", entityId: `ack-${Date.now().toString(36)}`, action: "ack", actor: effPhone || senderPhone, payload: { kind: "petani" } });
+          deliverAckFollowup("petani", String(effPhone || senderPhone || ""), String(message || ""), p);
+          return res.json({
+            reply: ACK_TEXT,
+            quickReplies: ["Cek Harga Pasar", "Bantuan"],
+            extracted: currentDraft || {},
+            isComplete: true,
+            isAdminAction: false,
+            aiProvider: "ack_pending",
+            ackPending: true,
+          } as any);
+        } else {
+          throw w.e;
+        }
       } else {
         aiResult = await callUniversalAI(
           systemInstructions,
@@ -5807,31 +8342,37 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
         // Merge extracted fields with regex extractor and previous draft
         const reg = extractFarmerFromText(message, currentDraft || {});
-        const merged = { ...(currentDraft || {}), ...(parsed.extracted || {}), ...(reg.extracted || {}) };
+        const merged = { ...(currentDraft || {}), ...scrubUnmentionedEstimates(parsed.extracted, message), ...(reg.extracted || {}) };
         parsed.extracted = merged;
 
         const lowerNonAdmin = (message || "").toLowerCase();
-        const isAddRequest =
-          lowerNonAdmin.includes("tambah") ||
-          lowerNonAdmin.includes("daftarkan") ||
-          lowerNonAdmin.includes("daftar") ||
-          lowerNonAdmin.includes("input") ||
-          lowerNonAdmin.includes("masukkan") ||
-          lowerNonAdmin.includes("catat") ||
-          lowerNonAdmin.includes("simpan");
+        const isAddRequest = isAddRegex(lowerNonAdmin);
 
         const check = checkFarmerCompleteness(merged);
 
         // Only save when ALL required fields are complete!
         // Tolak isComplete palsu: klaim lengkap tanpa satu pun field terisi = abaikan.
         const mergedHasAnyField = !!(merged.nama || merged.noHp || merged.komoditas || merged.luasLahan || merged.alamat || merged.kabupaten);
-        if (isAddRequest || (parsed.isComplete && mergedHasAnyField)) {
+        // Cermin guard admin: pertanyaan ("manfaat setelah terdaftar?") menyimpan
+        // jawaban LLM + draf; templat draf hanya dipaksa bila tak perlu nalar.
+        const regHasAnyF = !!reg.hasMinimumData;
+        const wantsReasoningF = needsReasoningMsg(message);
+        if (((isAddRequest || regHasAnyF) && !wantsReasoningF) || (parsed.isComplete && mergedHasAnyField)) {
           if (check.isComplete) {
-            const newRecord = saveFarmerRecord(merged, undefined, effPhone);
-            parsed.savedRecord = newRecord;
-            parsed.extracted = newRecord;
-            parsed.isComplete = true;
-            parsed.reply = formatSuccessFarmerRegistration(newRecord);
+            const dupFmLlm = findDuplicateFarmerByPhone(merged, undefined, effPhone);
+            if (dupFmLlm) {
+              parsed.reply = formatDuplicateAskPrompt(dupFmLlm, merged);
+              parsed.quickReplies = ["Ya, update", "Tidak"];
+              parsed.extracted = { ...merged, _pendingUpdate: dupFmLlm.id };
+              parsed.isComplete = false;
+              delete parsed.savedRecord;
+            } else {
+              const newRecord = saveFarmerRecord(merged, undefined, effPhone);
+              parsed.savedRecord = newRecord;
+              parsed.extracted = newRecord;
+              parsed.isComplete = true;
+              parsed.reply = formatSuccessFarmerRegistration(newRecord);
+            }
           } else {
             // INCOMPLETE DATA: DO NOT save to database yet! Prompt user to complete the missing fields.
             const incomplete = formatIncompleteFarmerPrompt(merged, undefined, false);
@@ -5844,7 +8385,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         }
 
         // Cache non-mutating response for future query reuse (Pillar 3)
-        if (isCacheable && parsed?.reply && !parsed?.isComplete && !parsed?.savedRecord) {
+        if (isCacheable && parsed?.reply && !parsed?.isComplete && !parsed?.savedRecord && isCacheWorthyReply(parsed.reply)) {
           aiResponseCache.set(cacheKey, {
             reply: parsed.reply,
             quickReplies: parsed.quickReplies,
@@ -5878,8 +8419,20 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     const extracted: Partial<FarmerRecord> = { ...(currentDraft || {}), ...reg.extracted };
     const check = checkFarmerCompleteness(extracted);
 
-    if (isAddRequest || reg.hasMinimumData) {
+    // Guard nalar + data-segar: sapaan/pertanyaan ("tolong bantu saya") tidak
+    // dipaksa jadi templat draf; kelanjutan berdata ("2 hektar") tetap lolos
+    // karena regFresh-nya berisi — bukan karena warisan draf.
+    const regFreshFb = extractFarmerFromText(message, {});
+    if ((isAddRequest || regFreshFb.hasMinimumData) && !needsReasoningMsg(message)) {
       if (check.isComplete) {
+        const dupFmFb = findDuplicateFarmerByPhone(extracted, undefined, effPhone);
+        if (dupFmFb) {
+          return res.json({
+            reply: formatDuplicateAskPrompt(dupFmFb, extracted),
+            quickReplies: ["Ya, update", "Tidak"],
+            extracted: { ...extracted, _pendingUpdate: dupFmFb.id }, isComplete: false, isAdminAction: false, aiProvider: "rule_based",
+          } as any);
+        }
         const newRecord = saveFarmerRecord(extracted, undefined, effPhone);
         return res.json({
           reply: formatSuccessFarmerRegistration(newRecord),
@@ -5921,7 +8474,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       const num = parseFloat(lower.match(/\d+(\.\d+)?/)?.[0] || "1.0");
       extracted.luasLahan = num;
       extracted.luasLahanFormatted = `${num} Ha`;
-      extracted.estimasiHasilTon = num * 6;
+      // ANTI-KARANGAN: tonase tidak dihitung sendiri; tanya user bila perlu.
       fallbackReply = `Data luasan *${num} Hektar* berhasil dicatat. Atas nama Bapak/Ibu siapa pendaftaran lahan ini dicatatkan ke database?`;
     }
 
@@ -6174,6 +8727,21 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       const msg = entry?.messages?.[0];
       const text = msg?.text?.body || msg?.button?.text || "";
       const from = msg?.from || "";
+      // ShareLoc Meta: msg.type === "location" -> msg.location.{latitude,longitude,name,address}.
+      const waLoc = msg?.type === "location" && msg?.location ? msg.location : null;
+      const waLocValid = !!(waLoc && isValidWaCoords(waLoc.latitude, waLoc.longitude));
+      if (msg && waLocValid) {
+        const locDetail = `${Number(waLoc.latitude).toFixed(6)},${Number(waLoc.longitude).toFixed(6)}`
+          + [waLoc.name, waLoc.address].filter((s: any) => String(s || "").trim()).map((s: any) => ` — ${String(s).slice(0, 100)}`).join("");
+        webhookLogs.unshift({
+          id: `wa-loc-${msg.id || Date.now()}`,
+          timestamp: new Date(Number(msg.timestamp || Date.now() / 1) * (msg.timestamp ? 1000 : 1)).toISOString(),
+          event: `WA lokasi dari ${from}`,
+          detail: locDetail.slice(0, 300),
+          status: "RECEIVED",
+        });
+        if (webhookLogs.length > 50) webhookLogs.pop();
+      }
       // Pesan masuk juga dicatat agar terlihat di GET /api/webhook/logs.
       if (msg && (text || from)) {
         webhookLogs.unshift({
@@ -6199,6 +8767,16 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         if (webhookLogs.length > 50) webhookLogs.pop();
         console.log(`[WA status] ${st.status} id=${st.id} to=${st.recipient_id} ${st.errors ? JSON.stringify(st.errors) : ""}`);
       }
+      if (waLocValid) {
+        // Idempoten dengan /api/wa-location (forwarder): tulis koordinat yang sama.
+        const r = applyWaLocationToFarmer(from, {
+          latitude: Number(waLoc.latitude),
+          longitude: Number(waLoc.longitude),
+          name: sanitizeText(waLoc.name, 200),
+          address: sanitizeText(waLoc.address, 500),
+        }, "wa-webhook");
+        console.log(`[WA] lokasi tersimpan dari ${from} -> ${r.mapsUrl}${r.farmerId ? ` (${r.farmerId})` : " (draf)"}`);
+      }
       if (text) {
         const clean = sanitizeText(text, 2000);
         const { extracted } = extractFarmerFromText(clean, {});
@@ -6209,7 +8787,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         } else {
           console.log(`[WA] draf masuk dari ${from}: ${check.missingFields.join(", ")}`);
         }
-      } else {
+      } else if (!waLocValid) {
         console.log("Incoming WhatsApp Webhook event:", JSON.stringify(body).slice(0, 500));
       }
       res.status(200).send("EVENT_RECEIVED");
@@ -6335,6 +8913,25 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", 'attachment; filename="TaniAI_Database_Petani_GoogleSheets.csv"');
     res.send(csvContent);
+  });
+
+  // Status cermin Sheets write-behind (terbuka; tanpa rahasia di output).
+  app.get("/api/sheets/status", async (_req, res) => {
+    res.json({ ...getSheetsStatus(), remote: await getSheetsRemote() });
+  });
+
+  // Paksa kirim antrean sekarang (Admin Utama bersesi).
+  app.post("/api/sheets/sync-now", requireSession(), async (req, res) => {
+    const gate = requireRequesterAdmin(req.body);
+    if (!gate.ok) {
+      return res.status(403).json({ error: gate.error });
+    }
+    try {
+      const r = await drainSheetsQueue("manual");
+      res.json(r);
+    } catch (e: any) {
+      res.status(502).json({ error: "Gagal sinkronisasi", detail: String(e?.message || e) });
+    }
   });
 
   // Standalone Google Sheets Live View Web Page with authentic spreadsheet UI & interaction
@@ -6651,6 +9248,21 @@ async function startServer() {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`🌾 TaniAI Server running on port ${PORT}`);
     initLayaDaemon();
+    initSheetsSync({
+      dataDir: DATA_DIR,
+      farmers: () => farmersDb,
+      suppliers: () => suppliersDb,
+      cash: () => cashDb,
+      stock: () => stockDb,
+      commodities: () => komoditasDb,
+      feedback: () => feedbackDb,
+      saveFarmers: () => saveFarmersToDisk(),
+      saveSuppliers: () => saveSuppliersToDisk(),
+      saveCash: () => saveCashToDisk(),
+      saveStock: () => saveStockToDisk(),
+      saveCommodities: () => saveKomoditasToDisk(),
+      saveFeedback: () => saveFeedbackToDisk(),
+    });
   });
 }
 
