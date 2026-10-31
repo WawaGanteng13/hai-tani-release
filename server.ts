@@ -7938,12 +7938,17 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         } else if (!sessAdm && fwdOk && waOutboundConfig().token) {
           // F5: WA berpacu — ack <8 dtk, jawaban asli susulan langsung.
           const p = callUniversalAI(adminSystemInstructions, message, history, { maxOutputTokens: 550, timeoutMs: ACK_BG_CAP_MS });
+          // Deadline ack dihitung dari request masuk (chatT0), bukan dari titik
+          // race — kerja pra-race (konteks/parsing) tak boleh mendorong ack
+          // lewat budget 8dtk forwarder.
+          const ackWaitMs = Math.max(500, ACK_AFTER_MS - (Date.now() - chatT0));
+          if (Date.now() - chatT0 > 1500) console.log(`[Ack] pra-race lambat ${Date.now() - chatT0}ms :: ${String(message || "").slice(0, 60)}`);
           const w = await Promise.race([
             p.then(
               (v) => ({ tag: "fast" as const, v }),
               (e) => ({ tag: "err" as const, e }),
             ),
-            sleepMs(ACK_AFTER_MS).then(() => ({ tag: "ack" as const })),
+            sleepMs(ackWaitMs).then(() => ({ tag: "ack" as const })),
           ]);
           if (w.tag === "fast") {
             aiResult = w.v;
@@ -8262,12 +8267,15 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       } else if (!sessAdm && fwdOk && waOutboundConfig().token) {
         // F5: WA berpacu — ack <8 dtk, jawaban asli susulan langsung.
         const p = callUniversalAI(systemInstructions, message, history, { maxOutputTokens: 550, timeoutMs: ACK_BG_CAP_MS });
+        // Deadline ack dari request masuk (lihat cabang admin).
+        const ackWaitMs = Math.max(500, ACK_AFTER_MS - (Date.now() - chatT0));
+        if (Date.now() - chatT0 > 1500) console.log(`[Ack] pra-race lambat ${Date.now() - chatT0}ms :: ${String(message || "").slice(0, 60)}`);
         const w = await Promise.race([
           p.then(
             (v) => ({ tag: "fast" as const, v }),
             (e) => ({ tag: "err" as const, e }),
           ),
-          sleepMs(ACK_AFTER_MS).then(() => ({ tag: "ack" as const })),
+          sleepMs(ackWaitMs).then(() => ({ tag: "ack" as const })),
         ]);
         if (w.tag === "fast") {
           aiResult = w.v;
