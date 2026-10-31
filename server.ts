@@ -34,6 +34,9 @@ import {
   FeedbackRecord,
   FeedbackKategori,
   DocumentRecord,
+  ProductRecord,
+  ProductKategori,
+  AffiliateSale,
 } from "./src/types";
 import { calculateFertilizerRecommendation } from "./src/utils/agronomy";
 import { nextId } from "./lib/next-id";
@@ -73,6 +76,12 @@ let feedbackDb: FeedbackRecord[] = [];
 
 // F8: dokumen WA terparsing (disk-backed).
 let documentsDb: DocumentRecord[] = [];
+
+// F4: katalog produk toko mitra + penjualan afiliasi (disk-backed).
+let productsDb: ProductRecord[] = [];
+let affiliateDb: AffiliateSale[] = [];
+// Keputusan Wawa: usahakan komisi afiliasi 3% dari harga jual normal.
+const AFFILIATE_PCT = 3;
 
 // Harga pasar live SISKAPERBAPO Disperindag Jatim (cache 30 menit)
 interface PasarPrice {
@@ -518,6 +527,8 @@ const OFFERS_FILE = path.join(DATA_DIR, "offers_db.json");
 const FEEDBACK_FILE = path.join(DATA_DIR, "feedback_db.json");
 const FEEDBACK_CSV = path.join(DATA_DIR, "feedback_db.csv");
 const DOCUMENTS_FILE = path.join(DATA_DIR, "documents_db.json");
+const PRODUCTS_FILE = path.join(DATA_DIR, "products_db.json");
+const AFFILIATE_FILE = path.join(DATA_DIR, "affiliate_db.json");
 
 // Webhook audit logs
 let webhookLogs: Array<{ id: string; timestamp: string; event: string; detail: string; status: string }> = [
@@ -619,6 +630,16 @@ function initPersistence() {
     if (Array.isArray(docData) && docData.length > 0) {
       documentsDb = docData as DocumentRecord[];
       console.log(`[Storage] Berhasil memuat ${documentsDb.length} dokumen dari disk (${DOCUMENTS_FILE})`);
+    }
+    const prdData = readJsonSafe<unknown>(PRODUCTS_FILE, [], "products_db.json");
+    if (Array.isArray(prdData) && prdData.length > 0) {
+      productsDb = prdData as ProductRecord[];
+      console.log(`[Storage] Berhasil memuat ${productsDb.length} produk afiliasi dari disk (${PRODUCTS_FILE})`);
+    }
+    const affData = readJsonSafe<unknown>(AFFILIATE_FILE, [], "affiliate_db.json");
+    if (Array.isArray(affData) && affData.length > 0) {
+      affiliateDb = affData as AffiliateSale[];
+      console.log(`[Storage] Berhasil memuat ${affiliateDb.length} penjualan afiliasi dari disk (${AFFILIATE_FILE})`);
     }
 
     const kmdData = readJsonSafe<unknown>(KOMODITAS_FILE, [], "komoditas_db.json");
@@ -945,6 +966,100 @@ function logDocument(phone: string, namaFile: string, tipe: string, ukuranByte: 
     payload: { tipe, komoditas: ent.komoditas.length, harga: ent.harga.length },
   });
   return rec;
+}
+
+function saveProductsToDisk() {
+  writeJsonAtomic(PRODUCTS_FILE, productsDb, "products_db.json");
+}
+
+function saveAffiliateToDisk() {
+  writeJsonAtomic(AFFILIATE_FILE, affiliateDb, "affiliate_db.json");
+}
+
+// F4: cari produk mitra aktif yang cocok dengan teks (nama/kata kunci).
+function matchProducts(text: string, limit = 5): ProductRecord[] {
+  const t = ` ${String(text || "").toLowerCase()} `;
+  const scored: Array<{ p: ProductRecord; n: number }> = [];
+  for (const p of productsDb) {
+    if (!p.aktif) continue;
+    const keys = [p.nama, ...(p.kataKunci || [])].map((k) => String(k || "").toLowerCase().trim()).filter((k) => k.length >= 3);
+    let n = 0;
+    for (const k of keys) if (t.includes(k)) n++;
+    if (n > 0) scored.push({ p, n });
+  }
+  scored.sort((a, b) => b.n - a.n);
+  return scored.slice(0, limit).map((s) => s.p);
+}
+
+function supplierName(id: string): string {
+  return suppliersDb.find((s) => s.id === id)?.nama || "(toko mitra)";
+}
+
+function productLine(p: ProductRecord): string {
+  return `• *${p.nama}* — Rp${Number(p.hargaNormal || 0).toLocaleString("id-ID")}/${p.satuan || "pcs"} di ${supplierName(p.supplierId)}`;
+}
+
+// F4: catat laporan pembelian petani -> AFF-xxx TERCATAT (komisi 3%).
+function logAffiliate(phone: string, p: ProductRecord, hargaRp: number): AffiliateSale {
+  const now = new Date().toISOString();
+  const me = normalizePhone(phone);
+  const fr = farmersDb.find((f) => normalizePhone(f.noHp) === me);
+  const harga = Number(hargaRp) > 0 ? Math.round(Number(hargaRp)) : Number(p.hargaNormal) || 0;
+  const rec: AffiliateSale = {
+    id: nextId("AFF", affiliateDb.map((a) => a.id)),
+    tanggal: now.substring(0, 10),
+    phone: String(phone || ""),
+    farmerId: fr?.id || undefined,
+    productId: p.id,
+    namaProduk: p.nama,
+    toko: supplierName(p.supplierId),
+    hargaRp: harga,
+    komisiRp: Math.round(harga * AFFILIATE_PCT / 100),
+    status: "TERCATAT",
+    waktuCatat: now,
+  };
+  affiliateDb.unshift(rec);
+  saveAffiliateToDisk();
+  bumpDataVersion();
+  emitCanonicalEvent({
+    source: "wa-chat", entity: "affiliate", entityId: rec.id,
+    action: "create", actor: phone,
+    payload: { productId: p.id, hargaRp: harga, komisiRp: rec.komisiRp },
+  });
+  return rec;
+}
+
+// F4: komisi diterima dari toko -> KAS-xxx MASUK "Komisi Affiliate" (cermin Sheets).
+function receiveCommission(affId: string, actorPhone: string): { aff: AffiliateSale; kasId: string } | null {
+  const a = affiliateDb.find((x) => x.id.toUpperCase() === String(affId || "").toUpperCase());
+  if (!a || a.status === "DITERIMA") return null;
+  const now = new Date().toISOString();
+  const record: CashTransaction = {
+    id: nextId("KAS", cashDb.map((c) => c.id)),
+    farmerId: "",
+    tanggal: now.substring(0, 10),
+    jenis: "MASUK",
+    kategori: "Komisi Affiliate" as any,
+    jumlahRp: a.komisiRp,
+    komoditas: sanitizeText(a.namaProduk, 60) || undefined,
+    catatan: sanitizeText(`Komisi ${AFFILIATE_PCT}% ${a.id}: ${a.namaProduk} @ ${a.toko} (lapor ${maskPhone(a.phone)})`, 500),
+    dicatatOleh: String(actorPhone || "sistem"),
+    waktuCatat: now,
+    googleSheetRow: nextSheetRow(cashDb.map((c) => c.googleSheetRow), cashDb.length),
+    syncStatus: "synced",
+  };
+  cashDb.unshift(record);
+  saveCashToDisk();
+  a.status = "DITERIMA";
+  a.kasId = record.id;
+  saveAffiliateToDisk();
+  bumpDataVersion();
+  emitCanonicalEvent({
+    source: "wa-chat", entity: "cash", entityId: record.id,
+    action: "create", actor: actorPhone,
+    payload: { jenis: "MASUK", kategori: "Komisi Affiliate", jumlahRp: a.komisiRp, affiliateId: a.id },
+  });
+  return { aff: a, kasId: record.id };
 }
 
 // Inisialisasi data storage saat server pertama kali booting
@@ -1861,7 +1976,7 @@ function finalizeOfferDeal(o: Offer, actorPhone: string): { kasId: string | null
 // penawaran OPEN yang menunggu harga petani yang sama.
 const NUDGE_EVERY_MS = 24 * 60 * 60 * 1000;
 // Perintah/fungsional: pesan seperti ini JANGAN disodori (v1 konservatif).
-const NUDGE_SKIPMSG_RE = /batal|blokir|izinkan|setuju|tidak setuju|daftar|tambah|komoditas|panen selesai|tutup komoditas|butuh|cari|carikan|\bbeli\b|membeli|perlu|nyari|order|pesan|stok|ready|siap|tersedia|harga|jual|tawar|minta|budget|deal|cek penawaran|status penawaran|OFR-|kas\b|catat|terjual|laku|saldo|hpp|rekap|analisis|verifikasi|broadcast|manfaat|benefit|program|hama|penyakit|wereng|ulat|tikus|pupuk|dosis|cuaca|bantuan|help|menu|sama|skip|lewati|stop|berhenti|pengingat|lapor harga|saran|masukan|kritik|usulan|keluhan|komplain|lapor|\d/;
+const NUDGE_SKIPMSG_RE = /batal|blokir|izinkan|setuju|tidak setuju|daftar|tambah|komoditas|panen selesai|tutup komoditas|butuh|cari|carikan|\bbeli\b|membeli|perlu|nyari|order|pesan|stok|ready|siap|tersedia|harga|jual|tawar|minta|budget|deal|cek penawaran|status penawaran|OFR-|kas\b|catat|terjual|laku|saldo|hpp|rekap|analisis|verifikasi|broadcast|manfaat|benefit|program|hama|penyakit|wereng|ulat|tikus|pupuk|dosis|cuaca|bantuan|help|menu|sama|skip|lewati|stop|berhenti|pengingat|lapor harga|saran|masukan|kritik|usulan|keluhan|komplain|lapor|cari|katalog|sudah beli|tambah produk|hapus produk|komisi|\d/;
 function pickNudgeTarget(farmerId: string): { kmd: FarmerCommodity; text: string } | null {
   const rows = komoditasDb.filter((k) => k.farmerId === farmerId && (k.status === "AKTIF" || k.status === "PANEN"));
   if (rows.length === 0) return null;
@@ -6700,6 +6815,21 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             logFeedback(String(senderPhone || ""), "TIDAK_TAHU", String(message || ""), `via-${ap || "llm"}`);
           }
         } catch (err) { console.error("[Feedback] autolog gagal:", (err as any)?.message || err); }
+        try {
+          // F4: tempel info toko mitra ke jawaban konsultasi obat/pupuk/saprodi
+          // (LLM saja; rule_based/fast/ack/cache/analytics dilewati).
+          const ap4 = (body as any)?.aiProvider;
+          if (typeof body?.reply === "string" && !/toko mitra/i.test(body.reply)
+            && ap4 !== "ack_pending" && ap4 !== "cache" && ap4 !== "fast_path"
+            && ap4 !== "rule_based" && ap4 !== "analytics_engine"
+            && /(obat|pupuk|hama|wereng|penyakit|fungisida|insektisida|herbisida|pestisida|saprodi)/i.test(String(message || ""))
+            && /(apa|mana|bagus|rekomendasi|dosis|cocok|beli|harga|merek|merk|cari)/i.test(String(message || ""))) {
+            const hits = matchProducts(`${message} ${body.reply}`, 2);
+            if (hits.length > 0) {
+              body.reply += `\n\n🛒 *Tersedia di toko mitra:*\n${hits.map(productLine).join("\n")}\nKetik *katalog* untuk semua produk, atau lapor: *sudah beli <nama>*.`;
+            }
+          }
+        } catch (err) { console.error("[Affiliate] tempel gagal:", (err as any)?.message || err); }
         const out = origJson(body);
         try {
           const farmerHit = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(senderPhone));
@@ -7399,6 +7529,99 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           quickReplies: ["📊 Rekap Semua Petani"], extracted: {},
           isComplete: true, isAdminAction: true, aiProvider: "rule_based",
         } as any);
+      }
+    }
+
+    // 0d-affiliate (F4). Katalog toko mitra + laporan pembelian (komisi 3%) +
+    // admin produk. SEBELUM cabang ERP/harga/estimasi/LLM.
+    {
+      const msgD = String(message || "");
+      const affReply = (reply: string, qr: string[]) => res.json({
+        reply, quickReplies: qr, extracted: {},
+        isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+      } as any);
+      const mTambah = isAdmin && msgD.match(/^\s*tambah produk\s*:?\s*(.+)$/is);
+      if (mTambah) {
+        const parts = mTambah[1].split(";").map((s) => s.trim());
+        if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) {
+          return affReply("📝 Format: *tambah produk: <nama> ; <harga> ; <toko> ; <katakunci koma, opsional>*\nContoh: tambah produk: Pupuk Urea 50kg ; 135000 ; Kios Tani Makmur ; urea, pupuk",
+            ["Lihat Katalog", "📊 Rekap Semua Petani"]);
+        }
+        const harga = Number(parts[1].replace(/[^\d]/g, "")) || 0;
+        if (harga <= 0) return affReply("⚠️ Harga harus angka > 0 (contoh: 135000).", ["Lihat Katalog"]);
+        const tokoKey = parts[2].toLowerCase();
+        const tokoHit = suppliersDb.find((s) => s.nama.toLowerCase().includes(tokoKey) || tokoKey.includes(s.nama.toLowerCase()));
+        if (!tokoHit) {
+          const daftar = suppliersDb.slice(0, 10).map((s) => s.nama).join(", ") || "(belum ada supplier)";
+          return affReply(`⚠️ Toko "${parts[2]}" tidak ada di data supplier. Pilihan: ${daftar}`, ["Lihat Katalog"]);
+        }
+        const keys = (parts[3] || "").split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length >= 3);
+        const namaL = parts[0].toLowerCase();
+        const kat: ProductKategori = /obat|insektisida|fungisida|herbisida|pestisida/.test(namaL + " " + keys.join(" ")) ? "Obat"
+          : /pupuk|urea|npk|kcl|phonska/.test(namaL + " " + keys.join(" ")) ? "Pupuk"
+          : /bibit|benih/.test(namaL) ? "Benih"
+          : /traktor|sprayer|pompa|cangkul|alat/.test(namaL) ? "Alat" : "Saprodi";
+        const satuan = /liter|\bl\b/i.test(parts[0]) ? "liter" : /sak/i.test(parts[0]) ? "sak"
+          : /botol/i.test(parts[0]) ? "botol" : /kg/i.test(parts[0]) ? "kg" : "pcs";
+        const now = new Date().toISOString();
+        const p: ProductRecord = {
+          id: nextId("PRD", productsDb.map((x) => x.id)),
+          supplierId: tokoHit.id, nama: sanitizeText(parts[0], 120), kategori: kat,
+          hargaNormal: harga, satuan, kataKunci: keys, aktif: true, waktuCatat: now,
+        };
+        productsDb.unshift(p);
+        saveProductsToDisk();
+        bumpDataVersion();
+        emitCanonicalEvent({ source: "wa-chat", entity: "product", entityId: p.id, action: "create", actor: effPhone || senderPhone, payload: { supplierId: p.supplierId, hargaNormal: harga } });
+        return affReply(`✅ Produk *${p.nama}* tercatat (\`${p.id}\`, ${kat}, Rp${harga.toLocaleString("id-ID")}/${satuan}, ${tokoHit.nama}).\nKomisi afiliasi ${AFFILIATE_PCT}% berlaku tiap laporan pembelian.`,
+          ["Lihat Katalog", "📊 Rekap Semua Petani"]);
+      }
+      const mHapus = isAdmin && msgD.match(/^\s*hapus produk\s+(PRD-\d+)\s*$/i);
+      if (mHapus) {
+        const p = productsDb.find((x) => x.id.toUpperCase() === mHapus[1].toUpperCase());
+        if (!p) return affReply(`⚠️ ${mHapus[1].toUpperCase()} tidak ada di katalog.`, ["Lihat Katalog"]);
+        p.aktif = false;
+        saveProductsToDisk();
+        bumpDataVersion();
+        return affReply(`🗑️ *${p.nama}* (\`${p.id}\`) dinonaktifkan dari katalog.`, ["Lihat Katalog"]);
+      }
+      const mKom = isAdmin && msgD.match(/^\s*komisi diterima\s+(AFF-\d+)\s*$/i);
+      if (mKom) {
+        const r = receiveCommission(mKom[1].toUpperCase(), String(effPhone || senderPhone || ""));
+        if (!r) return affReply(`⚠️ ${mKom[1].toUpperCase()} tidak ditemukan / sudah diterima.`, ["Lihat Katalog"]);
+        return affReply(`✅ Komisi *Rp${r.aff.komisiRp.toLocaleString("id-ID")}* (${AFFILIATE_PCT}% ${r.aff.id}) masuk kas \`${r.kasId}\` (Kategori: Komisi Affiliate).`,
+          ["Lihat Katalog", "📊 Rekap Semua Petani"]);
+      }
+      if (isAdmin && /^\s*lihat katalog\s*$/i.test(msgD)) {
+        const tertagih = affiliateDb.filter((a) => a.status === "TERCATAT");
+        const totKom = tertagih.reduce((n, a) => n + (Number(a.komisiRp) || 0), 0);
+        const list = productsDb.slice(0, 15).map((p) => `${p.aktif ? "•" : "○"} \`${p.id}\` ${p.nama} — Rp${Number(p.hargaNormal).toLocaleString("id-ID")} (${supplierName(p.supplierId)})`).join("\n") || "(katalog kosong)";
+        return affReply(`🛒 *Katalog toko mitra (${productsDb.filter((p) => p.aktif).length} aktif):*\n${list}\n\n💰 Komisi tertagih: Rp${totKom.toLocaleString("id-ID")} (${tertagih.length} transaksi).`,
+          ["📊 Rekap Semua Petani"]);
+      }
+      if (/^\s*katalog\s*$/i.test(msgD)) {
+        const acts = productsDb.filter((p) => p.aktif).slice(0, 10);
+        if (acts.length === 0) return affReply("🛒 Katalog toko mitra masih kosong. Admin sedang menyiapkan daftar produk — tanya lagi kapan-kapan ya.", ["Cek Harga Pasar Hari Ini", "Bantuan"]);
+        return affReply(`🛒 *Katalog toko mitra:*\n${acts.map(productLine).join("\n")}\n\nLapor setelah beli: *sudah beli <nama produk>* — komisi rujukan tercatat untuk kas Hai Tani.`,
+          ["Cek Harga Pasar Hari Ini", "Bantuan"]);
+      }
+      const mCari = msgD.match(/^\s*cari\s+(.{3,100})$/i);
+      if (mCari) {
+        const hits = matchProducts(mCari[1], 5);
+        if (hits.length === 0) return affReply(`🔍 Tidak ada produk "*${mCari[1].trim()}*" di katalog toko mitra. Ketik *katalog* untuk semua produk.`, ["Katalog", "Bantuan"]);
+        return affReply(`🔍 *Hasil cari "${mCari[1].trim()}":*\n${hits.map(productLine).join("\n")}\n\nLapor setelah beli: *sudah beli <nama produk>*.`,
+          ["Katalog", "Bantuan"]);
+      }
+      const mBeli = msgD.match(/^\s*sudah beli\s+(.+)$/is);
+      if (mBeli) {
+        const teks = mBeli[1];
+        const mRp = teks.match(/\brp\.?\s?([\d.]+)/i);
+        const hargaLap = mRp ? Number(mRp[1].replace(/[^\d]/g, "")) || 0 : 0;
+        const hits = matchProducts(teks, 1);
+        if (hits.length === 0) return affReply("⚠️ Produk tidak ada di katalog toko mitra. Ketik *katalog* untuk daftar persis, lalu lapor: *sudah beli <nama>*.", ["Katalog"]);
+        const a = logAffiliate(String(effPhone || senderPhone || ""), hits[0], hargaLap);
+        return affReply(`🧾 Terima kasih laporannya! Tercatat \`${a.id}\`:\n• ${a.namaProduk} @ ${a.toko}\n• Harga: Rp${a.hargaRp.toLocaleString("id-ID")} → komisi ${AFFILIATE_PCT}% = *Rp${a.komisiRp.toLocaleString("id-ID")}* untuk kas Hai Tani.\n\nSebutkan ke toko bahwa Bpk/Ibu dirujuk Hai Tani ya. 🙏`,
+          ["Katalog", "Cek Harga Pasar Hari Ini"]);
       }
     }
 

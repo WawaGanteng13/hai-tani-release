@@ -244,6 +244,34 @@ export interface DocumentRecord {
   waktuCatat: string;
 }
 
+// F4: katalog produk toko mitra + penjualan afiliasi (komisi 3%).
+export type ProductKategori = 'Obat' | 'Pupuk' | 'Saprodi' | 'Alat' | 'Benih';
+export interface ProductRecord {
+  id: string;
+  supplierId: string;
+  nama: string;
+  kategori: ProductKategori;
+  hargaNormal: number;
+  satuan: string;
+  kataKunci: string[];
+  aktif: boolean;
+  waktuCatat: string;
+}
+export interface AffiliateSale {
+  id: string;
+  tanggal: string;
+  phone: string;
+  farmerId?: string;
+  productId: string;
+  namaProduk: string;
+  toko: string;
+  hargaRp: number;
+  komisiRp: number;
+  status: 'TERCATAT' | 'DITERIMA';
+  kasId?: string;
+  waktuCatat: string;
+}
+
 export type CashJenis = 'MASUK' | 'KELUAR';
 export type CashKategoriMasuk = 'Penjualan Panen' | 'Subsidi/Bantuan' | 'Pinjaman' | 'Lainnya';
 export type CashKategoriKeluar =
