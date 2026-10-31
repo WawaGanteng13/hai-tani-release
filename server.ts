@@ -9206,11 +9206,12 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       const anomaliAktif = commoditiesDb.filter(
         (c) => c.statusAnomali === "LONJAKAN_EKSTREM" || c.statusAnomali === "PENURUNAN_DRASTIS"
       ).length;
+      const dealTercatat = offersDb.filter((o) => o.status === "DEAL").length;
       const totalLuasHa = Math.round(farmersDb.reduce((n, f) => n + (Number(f.luasLahan) || 0), 0) * 10) / 10;
       res.json({
         stats: {
           petani: farmersDb.length, pemasok: suppliersDb.length, totalLuasHa,
-          komoditas: commoditiesDb.length, anomaliAktif,
+          komoditas: commoditiesDb.length, anomaliAktif, deal: dealTercatat,
         },
         peta: { farmers, suppliers },
         updatedAt: new Date().toISOString(),
