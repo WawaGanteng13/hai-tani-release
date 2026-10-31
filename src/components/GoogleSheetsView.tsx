@@ -12,6 +12,7 @@ import {
   Layers,
   Sparkles,
   Trash2,
+  IdCard,
   Share2,
   Copy,
   Eye,
@@ -656,6 +657,15 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
                               <MapPin className="w-3.5 h-3.5 text-emerald-600" />
                             </a>
                           )}
+                          <a
+                            href={`/api/kartu/${encodeURIComponent(f.id)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-slate-400 hover:text-emerald-600 p-1 rounded transition"
+                            title={`Unduh Kartu Tanda Registrasi ${f.id} (PDF + QR)`}
+                          >
+                            <IdCard className="w-3.5 h-3.5" />
+                          </a>
                           <button
                             onClick={() => onDeleteFarmer(f.id)}
                             className="text-slate-400 hover:text-rose-600 p-1 rounded transition cursor-pointer"

@@ -45,6 +45,7 @@ interface FarmerSupplierMapViewProps {
   onSelectFarmerForChat?: (farmer: FarmerRecord) => void;
   mapsApiKey?: string;
   operatorNoHp?: string;
+  hidePrivate?: boolean;
 }
 
 // Calculate Haversine distance in kilometers between two geo coordinates
@@ -108,6 +109,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
   onSelectFarmerForChat,
   mapsApiKey: propKey,
   operatorNoHp = '',
+  hidePrivate = false,
 }) => {
   // Map API Key resolution with fallback
   const resolvedApiKey =
@@ -370,6 +372,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
               </div>
             </div>
 
+            {!hidePrivate && (
             <button
               onClick={() => setShowRegisterModal(true)}
               className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition cursor-pointer shadow-sm text-xs"
@@ -378,6 +381,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
               <Plus className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Tambah Titik Koordinat</span>
             </button>
+            )}
           </div>
         </div>
 
@@ -685,6 +689,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
                         <span>Rute</span>
                       </a>
 
+                      {!hidePrivate && (
                       <a
                         href={`https://wa.me/${selectedFarmer.noHp.replace(/[^0-9]/g, '')}`}
                         target="_blank"
@@ -694,6 +699,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
                         <Phone className="w-3 h-3" />
                         <span>WhatsApp</span>
                       </a>
+                      )}
                     </div>
                   </div>
                 </InfoWindow>
@@ -768,6 +774,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
                         <span>Rute</span>
                       </a>
 
+                      {!hidePrivate && (
                       <a
                         href={`https://wa.me/${selectedSupplier.kontak.replace(/[^0-9]/g, '')}`}
                         target="_blank"
@@ -777,6 +784,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
                         <Phone className="w-3 h-3" />
                         <span>Hubungi Kios</span>
                       </a>
+                      )}
                     </div>
                   </div>
                 </InfoWindow>
@@ -892,8 +900,12 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
                         <span className="text-slate-300 block">~{selectedFarmer.estimasiHasilTon} Ton ({selectedFarmer.estimasiPanen})</span>
                       </div>
                       <div>
-                        <span className="text-slate-400 block">Nomor WhatsApp:</span>
-                        <span className="font-mono text-white">{selectedFarmer.noHp}</span>
+                        {!hidePrivate && (
+                          <>
+                            <span className="text-slate-400 block">Nomor WhatsApp:</span>
+                            <span className="font-mono text-white">{selectedFarmer.noHp}</span>
+                          </>
+                        )}
                         <span className="text-emerald-400 block font-semibold text-[10px]">{selectedFarmer.statusVerifikasi}</span>
                       </div>
                     </div>
@@ -942,10 +954,12 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
                     </div>
 
                     <div className="mt-2 pt-2 border-t border-slate-800 text-[11px] space-y-1">
+                      {!hidePrivate && (
                       <div className="flex justify-between">
                         <span className="text-slate-400">Kontak:</span>
                         <span className="font-mono text-white">{selectedSupplier.kontak}</span>
                       </div>
+                      )}
                       <div className="flex justify-between">
                         <span className="text-slate-400">Status Kemitraan:</span>
                         <span className="text-sky-300 font-medium">{selectedSupplier.statusKemitraan}</span>

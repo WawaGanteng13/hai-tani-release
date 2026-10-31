@@ -5,6 +5,8 @@ import { spawn, ChildProcess } from "child_process";
 import crypto from "node:crypto";
 import https from "node:https";
 import dotenv from "dotenv";
+import QRCode from "qrcode";
+import { jsPDF } from "jspdf";
 import { GoogleGenAI } from "@google/genai";
 import {
   INITIAL_FARMERS,
@@ -1062,6 +1064,60 @@ function receiveCommission(affId: string, actorPhone: string): { aff: AffiliateS
   return { aff: a, kasId: record.id };
 }
 
+// FR-04: basis URL publik untuk tautan kartu WA. Urutan: env eksplisit ->
+// file status tunnel ops (otomatis ikut URL ngrok aktif) -> host request.
+function kartuPublicBase(fallbackHost: string): string {
+  const env = (process.env.KARTU_PUBLIC_BASE || "").trim().replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(env)) return env;
+  try {
+    const last = fs.readFileSync("C:\\Users\\USER\\hai-tani-ops\\last-status.txt", "utf8");
+    const m = last.match(/pub=(https?:\/\/[^\s]+)/);
+    if (m) return m[1].replace(/\/+$/, "");
+  } catch (_e) { /* abaikan: pakai host request */ }
+  const proto = /localhost|127\.0\.0\.1/i.test(fallbackHost) ? "http" : "https";
+  return `${proto}://${cleanHost(fallbackHost)}`;
+}
+
+// FR-04: susun PDF Kartu Tanda Registrasi (A6) + QR ID petani.
+async function buildKartuPdf(f: FarmerRecord): Promise<ArrayBuffer> {
+  const qr = await QRCode.toDataURL(`HAITANI:${f.id}`, { width: 240, margin: 1 });
+  const doc = new jsPDF({ unit: "mm", format: [105, 148] });
+  doc.setFillColor(5, 150, 105);
+  doc.rect(0, 0, 105, 26, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11);
+  doc.text("KARTU TANDA REGISTRASI PETANI", 52.5, 10, { align: "center" });
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.text("Hai Tani - Kang Tani AI", 52.5, 17, { align: "center" });
+  doc.setTextColor(20, 20, 20);
+  const rows: Array<[string, string]> = [
+    ["ID", f.id],
+    ["Nama", f.nama || "-"],
+    ["No HP", maskPhone(f.noHp)],
+    ["Komoditas", [f.komoditas, f.varietas].filter(Boolean).join(" / ") || "-"],
+    ["Luas Lahan", f.luasLahanFormatted || `${Number(f.luasLahan || 0)} Ha`],
+    ["Kabupaten", f.kabupaten || "-"],
+    ["Status", f.statusVerifikasi || "-"],
+    ["Terdaftar", String(f.timestamp || "").slice(0, 10) || "-"],
+  ];
+  let y = 34;
+  doc.setFontSize(10);
+  for (const [k, v] of rows) {
+    const val = String(v || "-").slice(0, 34);
+    doc.setFont("helvetica", "bold");
+    doc.text(`${k}:`, 10, y);
+    doc.setFont("helvetica", "normal");
+    doc.text(val, 38, y);
+    y += 7;
+  }
+  doc.addImage(qr, "PNG", 32.5, 94, 40, 40);
+  doc.setFontSize(8);
+  doc.text(`Pindai: HAITANI:${f.id}`, 52.5, 139, { align: "center" });
+  return doc.output("arraybuffer");
+}
+
 // Inisialisasi data storage saat server pertama kali booting
 initPersistence();
 
@@ -1976,7 +2032,7 @@ function finalizeOfferDeal(o: Offer, actorPhone: string): { kasId: string | null
 // penawaran OPEN yang menunggu harga petani yang sama.
 const NUDGE_EVERY_MS = 24 * 60 * 60 * 1000;
 // Perintah/fungsional: pesan seperti ini JANGAN disodori (v1 konservatif).
-const NUDGE_SKIPMSG_RE = /batal|blokir|izinkan|setuju|tidak setuju|daftar|tambah|komoditas|panen selesai|tutup komoditas|butuh|cari|carikan|\bbeli\b|membeli|perlu|nyari|order|pesan|stok|ready|siap|tersedia|harga|jual|tawar|minta|budget|deal|cek penawaran|status penawaran|OFR-|kas\b|catat|terjual|laku|saldo|hpp|rekap|analisis|verifikasi|broadcast|manfaat|benefit|program|hama|penyakit|wereng|ulat|tikus|pupuk|dosis|cuaca|bantuan|help|menu|sama|skip|lewati|stop|berhenti|pengingat|lapor harga|saran|masukan|kritik|usulan|keluhan|komplain|lapor|cari|katalog|sudah beli|tambah produk|hapus produk|komisi|\d/;
+const NUDGE_SKIPMSG_RE = /batal|blokir|izinkan|setuju|tidak setuju|daftar|tambah|komoditas|panen selesai|tutup komoditas|butuh|cari|carikan|\bbeli\b|membeli|perlu|nyari|order|pesan|stok|ready|siap|tersedia|harga|jual|tawar|minta|budget|deal|cek penawaran|status penawaran|OFR-|kas\b|catat|terjual|laku|saldo|hpp|rekap|analisis|verifikasi|broadcast|manfaat|benefit|program|hama|penyakit|wereng|ulat|tikus|pupuk|dosis|cuaca|bantuan|help|menu|sama|skip|lewati|stop|berhenti|pengingat|lapor harga|saran|masukan|kritik|usulan|keluhan|komplain|lapor|cari|katalog|sudah beli|tambah produk|hapus produk|komisi|kartu|\d/;
 function pickNudgeTarget(farmerId: string): { kmd: FarmerCommodity; text: string } | null {
   const rows = komoditasDb.filter((k) => k.farmerId === farmerId && (k.status === "AKTIF" || k.status === "PANEN"));
   if (rows.length === 0) return null;
@@ -7625,6 +7681,37 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       }
     }
 
+    // 0e-kartu (FR-04). Kartu Tanda Registrasi PDF + QR: "kartu saya" (petani
+    // terdaftar via no HP pengirim) atau "kartu TANI-016" (khusus admin).
+    // SEBELUM cabang ERP/harga/estimasi/LLM.
+    {
+      const msgK = String(message || "");
+      const kartuReply = (reply: string, qr: string[]) => res.json({
+        reply, quickReplies: qr, extracted: {},
+        isComplete: true, isAdminAction: !!isAdmin, aiProvider: "rule_based",
+      } as any);
+      const mKartuIdAny = msgK.match(/^\s*kartu\s+(TANI-\d+)\s*$/i);
+      if (mKartuIdAny && !isAdmin) {
+        return kartuReply("🔒 Melihat kartu petani lain khusus admin/petugas. Ketik *kartu saya* untuk kartu sendiri.", ["Bantuan"]);
+      }
+      if (mKartuIdAny && isAdmin) {
+        const want = mKartuIdAny[1].toUpperCase();
+        const f = farmersDb.find((x) => x.id.toUpperCase() === want) || null;
+        if (!f) return kartuReply(`⚠️ ${want} tidak ada di data petani.`, ["📊 Rekap Semua Petani"]);
+        const base = kartuPublicBase(String((req as any)?.get?.("host") || ""));
+        return kartuReply(`🪪 *Kartu Tanda Registrasi ${f.id}*\n• ${f.nama}\n• ${f.komoditas} — ${f.luasLahanFormatted || f.luasLahan + " Ha"}\n• Status: ${f.statusVerifikasi}\n\nUnduh PDF + QR:\n${base}/api/kartu/${encodeURIComponent(f.id)}`,
+          ["📊 Rekap Semua Petani"]);
+      }
+      if (/^\s*(kartu saya|kartu tani saya|cetak kartu)\s*$/i.test(msgK)) {
+        const me = normalizePhone(String(effPhone || senderPhone || ""));
+        const f = farmersDb.find((x) => normalizePhone(x.noHp) === me) || null;
+        if (!f) return kartuReply("ℹ️ Nomor ini belum terdaftar sebagai petani. Ketik *daftar* untuk mendaftar, lalu kartu bisa dicetak.", ["Daftar", "Bantuan"]);
+        const base = kartuPublicBase(String((req as any)?.get?.("host") || ""));
+        return kartuReply(`🪪 *Kartu Tanda Registrasi ${f.id}*\n• ${f.nama}\n• ${f.komoditas} — ${f.luasLahanFormatted || f.luasLahan + " Ha"}\n• Status: ${f.statusVerifikasi}\n\nUnduh PDF + QR:\n${base}/api/kartu/${encodeURIComponent(f.id)}`,
+          ["Cek Harga Pasar Hari Ini", "Bantuan"]);
+      }
+    }
+
     // 0a-benefit. Pertanyaan manfaat/program ("apa benefit setelah terdaftar?",
     // "jelaskan program hai tani"): jawab deterministik dari daftar manfaat
     // resmi (terverifikasi sesuai kemampuan terkirim) — JANGAN templat draf.
@@ -9095,6 +9182,59 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       }
     }
     res.json({ success: true, notification: notif, wa });
+  });
+
+  // HALAMAN PUBLIK (tanpa sesi): ringkasan statistik + titik peta teranonimasi.
+  // Tanpa noHp/kontak/alamat detail. Nama + komoditas + kabupaten tampil sesuai
+  // prinsip Sheets transparan (petani mendaftar untuk terdata di peta).
+  app.get("/api/publik/ringkas", (_req, res) => {
+    try {
+      const farmers = farmersDb
+        .filter((f) => typeof f.latitude === "number" && typeof f.longitude === "number")
+        .map((f) => ({
+          id: f.id, nama: f.nama, komoditas: f.komoditas, kabupaten: f.kabupaten || "",
+          latitude: f.latitude, longitude: f.longitude, statusVerifikasi: f.statusVerifikasi,
+        }));
+      const suppliers = suppliersDb
+        .filter((s) => typeof s.latitude === "number" && typeof s.longitude === "number")
+        .map((s) => ({
+          id: s.id, nama: s.nama, kategori: s.kategori, kabupaten: s.kabupaten || "",
+          latitude: s.latitude, longitude: s.longitude, statusKemitraan: s.statusKemitraan,
+          produkUnggulan: s.produkUnggulan || [], stokTersedia: s.stokTersedia || "",
+          jamBuka: s.jamBuka || "",
+        }));
+      const anomaliAktif = commoditiesDb.filter(
+        (c) => c.statusAnomali === "LONJAKAN_EKSTREM" || c.statusAnomali === "PENURUNAN_DRASTIS"
+      ).length;
+      const totalLuasHa = Math.round(farmersDb.reduce((n, f) => n + (Number(f.luasLahan) || 0), 0) * 10) / 10;
+      res.json({
+        stats: {
+          petani: farmersDb.length, pemasok: suppliersDb.length, totalLuasHa,
+          komoditas: commoditiesDb.length, anomaliAktif,
+        },
+        peta: { farmers, suppliers },
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: "Gagal memuat ringkasan publik" });
+    }
+  });
+
+  // FR-04: Kartu Tanda Registrasi PDF + QR. PUBLIK (tanpa sesi) agar bisa dibuka
+  // petani dari tautan WA; no HP tampil termasking. Field kartu non-rahasia
+  // (sejalan prinsip Sheets transparan).
+  app.get("/api/kartu/:id", async (req, res) => {
+    try {
+      const id = String(req.params.id || "").toUpperCase();
+      const f = farmersDb.find((x) => x.id.toUpperCase() === id);
+      if (!f) { res.status(404).json({ error: "Petani tidak ditemukan" }); return; }
+      const pdf = await buildKartuPdf(f);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename="kartu-${f.id}.pdf"`);
+      res.send(Buffer.from(pdf));
+    } catch (e: any) {
+      res.status(500).json({ error: "Gagal membuat kartu", detail: String(e?.message || e) });
+    }
   });
 
   // CSV Export for Google Sheets

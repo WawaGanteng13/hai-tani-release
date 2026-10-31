@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
+import { Routes, Route, Navigate, Link } from 'react-router-dom';
 import { Header } from './components/Header';
+import { PublicView } from './components/PublicView';
 import { AgriProfessionalDashboard } from './components/AgriProfessionalDashboard';
 import { WhatsAppChatbot } from './components/WhatsAppChatbot';
 import { GoogleSheetsView } from './components/GoogleSheetsView';
@@ -22,9 +24,18 @@ import {
   INITIAL_ADMINS,
   INITIAL_SUPPLIERS,
 } from './data/mockData';
-import { CheckCircle2, AlertTriangle, Info, X } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, Info, X, Sprout } from 'lucide-react';
 
-export default function App() {
+const TAB_TITLES = {
+  dashboard: 'Ringkasan',
+  chat: 'Simulator Chat',
+  sheets: 'Data',
+  market: 'Harga & Anomali',
+  datascientist: 'Data Scientist',
+  map: 'Peta',
+} as const;
+
+function AdminApp() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map'>('dashboard');
   const [farmers, setFarmers] = useState<FarmerRecord[]>(INITIAL_FARMERS);
   const [commodities, setCommodities] = useState<MarketCommodity[]>(INITIAL_COMMODITIES);
@@ -42,6 +53,8 @@ export default function App() {
   const [isLayaModalOpen, setIsLayaModalOpen] = useState(false);
   const [isWhitepaperModalOpen, setIsWhitepaperModalOpen] = useState(false);
   const [layaStatus, setLayaStatus] = useState<LayaStatus | null>(null);
+  const [sheetsStatus, setSheetsStatus] = useState<{ workerOn?: boolean; queueDepth?: number } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [layaLoading, setLayaLoading] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'warning' | 'info'; text: string } | null>(null);
   const [me, setMe] = useState<{ nama: string; role: string; noHp: string } | null>(null);
@@ -108,6 +121,7 @@ export default function App() {
       setMe(null); setLoading(false); return;
     }
     setLoading(true);
+    setLoadError(null);
     try {
       const [fRes, cRes, nRes, rRes, aRes, sRes] = await Promise.all([
         fetch('/api/farmers'),
@@ -119,6 +133,12 @@ export default function App() {
       ]);
 
       fetchLayaStatus();
+      try {
+        const shRes = await fetch('/api/sheets/status');
+        if (shRes.ok) setSheetsStatus(await shRes.json());
+      } catch {
+        /* abaikan: indikator ikut status terakhir */
+      }
 
       if (fRes.ok) {
         const fData = await fRes.json();
@@ -146,6 +166,7 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error fetching data:', err);
+      setLoadError(err instanceof Error ? err.message : 'Koneksi gagal');
     } finally {
       setLoading(false);
     }
@@ -345,7 +366,9 @@ export default function App() {
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans">
         <form onSubmit={handleLogin} className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 w-full max-w-sm space-y-4">
           <div className="text-center">
-            <div className="text-3xl mb-1">🌾</div>
+            <div className="w-11 h-11 mx-auto mb-2 rounded-xl bg-emerald-700 flex items-center justify-center">
+              <Sprout className="w-6 h-6 text-white" />
+            </div>
             <h1 className="font-bold text-slate-900 text-lg">TaniAI Dashboard</h1>
             <p className="text-xs text-slate-500">Masuk dengan nomor admin + password</p>
           </div>
@@ -365,15 +388,14 @@ export default function App() {
           <button type="submit" disabled={loginBusy} className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold disabled:opacity-50">
             {loginBusy ? 'Memeriksa...' : 'Masuk'}
           </button>
-          <p className="text-[11px] text-slate-400 text-center">Admin baru? Set password dulu via POST /api/auth/setup-password.</p>
+          <Link to="/publik" className="block text-[11px] text-emerald-700 hover:text-emerald-900 text-center">Lihat halaman publik tanpa login</Link>
         </form>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col font-sans text-slate-800 antialiased selection:bg-emerald-500 selection:text-white">
-      {/* Top Navigation */}
+    <div className="min-h-screen bg-slate-100 flex font-sans text-slate-800 antialiased selection:bg-emerald-500 selection:text-white">
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -385,6 +407,9 @@ export default function App() {
         anomaliesCount={anomaliesCount}
         adminsCount={admins.length}
         layaActive={!!layaStatus?.healthy}
+        meName={me?.nama}
+        meRole={me?.role}
+        onLogout={handleLogout}
       />
 
       {/* Floating Toast Notification */}
@@ -417,8 +442,23 @@ export default function App() {
         </div>
       )}
 
+      <div className="flex-1 min-w-0 flex flex-col min-h-screen">
+        <div className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 flex items-center justify-between shrink-0">
+          <h1 className="text-lg font-bold text-slate-900">{TAB_TITLES[activeTab]}</h1>
+          <div className="flex items-center gap-1.5 text-xs text-slate-500">
+            <span className={`w-2 h-2 rounded-full ${sheetsStatus?.workerOn ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+            <span>{sheetsStatus ? (sheetsStatus.workerOn ? `Sheets antre ${sheetsStatus.queueDepth ?? 0}` : 'Sheets mati') : 'Sheets…'}</span>
+          </div>
+        </div>
+        {loadError && (
+          <div className="mx-4 sm:mx-6 lg:mx-8 mt-4 flex items-center justify-between gap-3 bg-rose-50 border border-rose-200 rounded-lg px-4 py-2.5">
+            <p className="text-xs text-rose-700">Gagal memuat data ({loadError}). Menampilkan data terakhir.</p>
+            <button onClick={loadData} className="text-xs font-medium text-rose-700 hover:text-rose-900 shrink-0 cursor-pointer">Muat ulang</button>
+          </div>
+        )}
+
       {/* Main Content Area */}
-      <main className={activeTab === 'map' ? 'flex-1 p-0 overflow-hidden' : 'flex-1 px-4 sm:px-6 lg:px-8 py-6'}>
+      <main className={activeTab === 'map' ? 'h-[calc(100vh-4rem)] overflow-hidden shrink-0' : 'flex-1 px-4 sm:px-6 lg:px-8 py-6'}>
         <div key={activeTab} className="animate-fade-in">
         {activeTab === 'dashboard' && (
           <div className="space-y-6">
@@ -491,6 +531,7 @@ export default function App() {
         )}
         </div>
       </main>
+      </div>
 
       {/* Modals */}
       <WebhookModal
@@ -531,5 +572,16 @@ export default function App() {
         onClose={() => setIsWhitepaperModalOpen(false)}
       />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<Navigate to="/publik" replace />} />
+      <Route path="/publik" element={<PublicView />} />
+      <Route path="/admin" element={<AdminApp />} />
+      <Route path="*" element={<Navigate to="/publik" replace />} />
+    </Routes>
   );
 }

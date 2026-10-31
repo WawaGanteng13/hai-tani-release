@@ -1,9 +1,28 @@
 import React from 'react';
-import { Sprout, MessageSquare, Table, TrendingUp, Cpu, Radio, BarChart3, MapPin, FileText, Zap } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import {
+  Sprout,
+  LayoutDashboard,
+  Table,
+  MessageSquare,
+  TrendingUp,
+  Cpu,
+  MapPin,
+  Radio,
+  Users,
+  Zap,
+  FileText,
+  LogOut,
+  Globe,
+} from 'lucide-react';
+
+export type AdminTab = 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map';
+
+type Icon = React.ComponentType<{ className?: string }>;
 
 interface HeaderProps {
-  activeTab: 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map';
-  setActiveTab: (tab: 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map') => void;
+  activeTab: AdminTab;
+  setActiveTab: (tab: AdminTab) => void;
   onOpenWebhookModal: () => void;
   onOpenAdminModal?: () => void;
   onOpenLayaModal?: () => void;
@@ -12,7 +31,40 @@ interface HeaderProps {
   anomaliesCount: number;
   adminsCount?: number;
   layaActive?: boolean;
+  meName?: string;
+  meRole?: string;
+  onLogout?: () => void;
 }
+
+const NAV_MAIN: Array<{ id: AdminTab; label: string; icon: Icon }> = [
+  { id: 'dashboard', label: 'Ringkasan', icon: LayoutDashboard },
+  { id: 'sheets', label: 'Data', icon: Table },
+  { id: 'market', label: 'Harga & Anomali', icon: TrendingUp },
+  { id: 'map', label: 'Peta', icon: MapPin },
+];
+
+const NavButton: React.FC<{
+  active: boolean;
+  onClick: () => void;
+  icon: Icon;
+  label: string;
+  badge?: React.ReactNode;
+}> = ({ active, onClick, icon: ItemIcon, label, badge }) => (
+  <button
+    onClick={onClick}
+    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition cursor-pointer ${
+      active ? 'bg-emerald-50 text-emerald-800 font-medium' : 'text-slate-600 hover:bg-slate-100'
+    }`}
+  >
+    <ItemIcon className="w-4 h-4 shrink-0" />
+    <span className="flex-1 text-left truncate">{label}</span>
+    {badge}
+  </button>
+);
+
+const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <p className="px-3 pt-4 pb-1.5 text-[11px] font-semibold text-slate-400">{children}</p>
+);
 
 export const Header: React.FC<HeaderProps> = ({
   activeTab,
@@ -23,187 +75,130 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenWhitepaperModal,
   farmersCount,
   anomaliesCount,
-  adminsCount = 3,
+  adminsCount = 0,
   layaActive = false,
+  meName,
+  meRole,
+  onLogout,
 }) => {
   return (
-    <header className="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-40 shadow-sm">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16">
-          {/* Logo & Branding */}
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-green-500 flex items-center justify-center shadow-lg shadow-emerald-500/20">
-              <Sprout className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center space-x-2">
-                <span className="font-bold text-lg tracking-tight text-white">TaniAI</span>
-                <span className="text-[11px] font-semibold bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30">
-                  Agri-Agent 2.5
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 hidden sm:block">
-                WhatsApp Chatbot &bull; Google Sheets Real-Time &bull; Analisis Data Scientist
-              </p>
-            </div>
-          </div>
-
-          {/* Quick status & Webhook action & Admin RBAC */}
-          <div className="flex items-center space-x-2 sm:space-x-3">
-            {onOpenLayaModal && (
-              <button
-                onClick={onOpenLayaModal}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 text-xs font-medium transition cursor-pointer shadow-xs"
-                title="Status Laya Non-Autoregressive Decision Engine"
-              >
-                <Zap className={`w-3.5 h-3.5 ${layaActive ? 'text-emerald-400 animate-pulse' : 'text-slate-400'}`} />
-                <span className="hidden sm:inline">Laya:</span>
-                <span className={`font-mono px-1.5 py-0.2 rounded font-bold text-[11px] ${
-                  layaActive ? 'bg-emerald-900 text-emerald-200' : 'bg-slate-800 text-slate-400'
-                }`}>
-                  {layaActive ? 'System-1' : 'Ready'}
-                </span>
-              </button>
-            )}
-
-            {onOpenAdminModal && (
-              <button
-                onClick={onOpenAdminModal}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-700/60 text-xs font-medium transition cursor-pointer shadow-xs"
-                title="Kelola Nomor Admin WhatsApp yang Dikenali Tani AI"
-              >
-                <span className="text-amber-400">🛡️</span>
-                <span className="hidden sm:inline">Nomor Admin:</span>
-                <span className="font-mono bg-amber-900/90 text-amber-200 px-1.5 py-0.2 rounded font-bold">
-                  {adminsCount}
-                </span>
-              </button>
-            )}
-
-            {onOpenWhitepaperModal && (
-              <button
-                onClick={onOpenWhitepaperModal}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-purple-950/80 hover:bg-purple-900 text-purple-200 border border-purple-700/60 text-xs font-medium transition cursor-pointer shadow-xs"
-                title="Buka Dokumen Arsitektur & Unduh PDF Spesifikasi Teknis"
-              >
-                <FileText className="w-3.5 h-3.5 text-purple-300" />
-                <span className="hidden sm:inline">Arsitektur PDF</span>
-              </button>
-            )}
-
-            <button
-              onClick={onOpenWebhookModal}
-              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/50 text-xs font-medium transition cursor-pointer"
-              title="Integrasi Webhook WhatsApp"
-            >
-              <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-              <span className="hidden md:inline">Webhook WA:</span>
-              <span className="font-mono text-emerald-200">Active</span>
-            </button>
-
-            <div className="hidden lg:flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-xs text-slate-300">
-              <span className="w-2 h-2 rounded-full bg-green-500 animate-ping" />
-              <span>Sheets Sync:</span>
-              <span className="font-semibold text-emerald-400">Connected</span>
-            </div>
-          </div>
+    <aside className="w-60 shrink-0 bg-white border-r border-slate-200 flex flex-col h-screen sticky top-0">
+      <div className="h-16 px-4 flex items-center gap-2.5 border-b border-slate-200">
+        <div className="w-9 h-9 rounded-lg bg-emerald-700 flex items-center justify-center shrink-0">
+          <Sprout className="w-5 h-5 text-white" />
         </div>
-
-        {/* Navigation Tabs */}
-        <div className="flex space-x-1 sm:space-x-2 overflow-x-auto pb-2 scrollbar-none">
-          <button
-            onClick={() => setActiveTab('dashboard')}
-            className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition whitespace-nowrap cursor-pointer ${
-              activeTab === 'dashboard'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-700/20'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <BarChart3 className="w-4 h-4 text-emerald-300" />
-            <span>Dashboard Profesional</span>
-            <span className="bg-emerald-500/30 text-emerald-300 text-[10px] px-1.5 py-0.2 rounded-full font-mono font-semibold">
-              Analitik
-            </span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('sheets')}
-            className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition whitespace-nowrap cursor-pointer ${
-              activeTab === 'sheets'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-700/20'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <Table className="w-4 h-4" />
-            <span>Database Google Sheets</span>
-            <span className="bg-slate-700 text-slate-200 text-[10px] px-1.5 py-0.2 rounded-full font-mono">
-              {farmersCount}
-            </span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('chat')}
-            className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition whitespace-nowrap cursor-pointer ${
-              activeTab === 'chat'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-700/20'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <MessageSquare className="w-4 h-4" />
-            <span>Chatbot WhatsApp</span>
-            <span className="bg-emerald-800/80 text-emerald-200 text-[10px] px-1.5 py-0.2 rounded-full font-mono">
-              Live
-            </span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('market')}
-            className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition whitespace-nowrap cursor-pointer ${
-              activeTab === 'market'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-700/20'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <TrendingUp className="w-4 h-4" />
-            <span>Anomali Harga & Notifikasi</span>
-            {anomaliesCount > 0 && (
-              <span className="bg-rose-500 text-white text-[10px] px-1.5 py-0.2 rounded-full font-bold animate-pulse">
-                {anomaliesCount} Anomali
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('datascientist')}
-            className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition whitespace-nowrap cursor-pointer ${
-              activeTab === 'datascientist'
-                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-700/20'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <Cpu className="w-4 h-4 text-indigo-300" />
-            <span>Portal Data Scientist & Rekomendasi</span>
-            <span className="bg-indigo-900/80 text-indigo-200 text-[10px] px-1.5 py-0.2 rounded-full font-mono">
-              AI
-            </span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('map')}
-            className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition whitespace-nowrap cursor-pointer ${
-              activeTab === 'map'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-700/20'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <MapPin className="w-4 h-4 text-emerald-300" />
-            <span>Peta Sebaran Petani & Supplier</span>
-            <span className="bg-emerald-500/30 text-emerald-300 text-[10px] px-1.5 py-0.2 rounded-full font-mono font-semibold">
-              Maps
-            </span>
-          </button>
+        <div className="min-w-0">
+          <p className="font-bold text-slate-900 leading-tight">Hai Tani</p>
+          <p className="text-xs text-slate-500 leading-tight">Konsol Admin</p>
         </div>
       </div>
-    </header>
+
+      <nav className="flex-1 overflow-y-auto px-3 pb-3">
+        <SectionLabel>Menu</SectionLabel>
+        <div className="space-y-0.5">
+          {NAV_MAIN.map((n) => (
+            <NavButton
+              key={n.id}
+              active={activeTab === n.id}
+              onClick={() => setActiveTab(n.id)}
+              icon={n.icon}
+              label={n.label}
+              badge={
+                n.id === 'sheets' ? (
+                  <span className="bg-slate-100 text-slate-600 text-[11px] px-1.5 py-0.5 rounded tabular-nums">
+                    {farmersCount}
+                  </span>
+                ) : n.id === 'market' && anomaliesCount > 0 ? (
+                  <span className="bg-rose-100 text-rose-700 text-[11px] px-1.5 py-0.5 rounded tabular-nums font-semibold">
+                    {anomaliesCount}
+                  </span>
+                ) : undefined
+              }
+            />
+          ))}
+        </div>
+
+        <SectionLabel>Analisis</SectionLabel>
+        <div className="space-y-0.5">
+          <NavButton
+            active={activeTab === 'datascientist'}
+            onClick={() => setActiveTab('datascientist')}
+            icon={Cpu}
+            label="Data Scientist"
+          />
+        </div>
+
+        <SectionLabel>Perkakas</SectionLabel>
+        <div className="space-y-0.5">
+          <NavButton
+            active={activeTab === 'chat'}
+            onClick={() => setActiveTab('chat')}
+            icon={MessageSquare}
+            label="Simulator Chat"
+          />
+          <NavButton active={false} onClick={onOpenWebhookModal} icon={Radio} label="Webhook" />
+          {onOpenAdminModal && (
+            <NavButton
+              active={false}
+              onClick={onOpenAdminModal}
+              icon={Users}
+              label="Kelola Admin"
+              badge={
+                <span className="bg-slate-100 text-slate-600 text-[11px] px-1.5 py-0.5 rounded tabular-nums">
+                  {adminsCount}
+                </span>
+              }
+            />
+          )}
+          {onOpenLayaModal && (
+            <NavButton
+              active={false}
+              onClick={onOpenLayaModal}
+              icon={Zap}
+              label="Laya"
+              badge={
+                <span
+                  className={`w-2 h-2 rounded-full ${layaActive ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                  title={layaActive ? 'Aktif' : 'Siaga'}
+                />
+              }
+            />
+          )}
+          {onOpenWhitepaperModal && (
+            <NavButton active={false} onClick={onOpenWhitepaperModal} icon={FileText} label="Arsitektur" />
+          )}
+        </div>
+      </nav>
+
+      <div className="border-t border-slate-200 p-3 space-y-2">
+        <Link
+          to="/publik"
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition"
+        >
+          <Globe className="w-4 h-4 shrink-0" />
+          <span>Lihat Halaman Publik</span>
+        </Link>
+        {meName && (
+          <div className="flex items-center gap-2.5 px-3 py-1">
+            <div className="w-8 h-8 rounded-full bg-emerald-700 text-white flex items-center justify-center text-xs font-bold shrink-0">
+              {meName.slice(0, 1).toUpperCase()}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-slate-800 truncate">{meName}</p>
+              <p className="text-xs text-slate-500 truncate">{meRole}</p>
+            </div>
+            {onLogout && (
+              <button
+                onClick={onLogout}
+                title="Keluar"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </aside>
   );
 };
