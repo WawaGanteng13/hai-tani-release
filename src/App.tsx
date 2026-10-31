@@ -385,18 +385,24 @@ function AdminApp() {
             <p className="text-xs text-slate-500">Masuk dengan nomor admin + password</p>
           </div>
           {loginError && (
-            <div className="bg-rose-50 text-rose-700 text-xs p-2 rounded-lg border border-rose-200">{loginError}</div>
+            <div role="alert" className="bg-rose-50 text-rose-700 text-xs p-2 rounded-lg border border-rose-200">{loginError}</div>
           )}
-          <input
-            type="text" value={loginNoHp} onChange={(e) => setLoginNoHp(e.target.value)}
-            placeholder="No. WhatsApp admin" required
-            className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none"
-          />
-          <input
-            type="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)}
-            placeholder="Password" required
-            className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none"
-          />
+          <div>
+            <label htmlFor="login-nohp" className="block text-xs font-medium text-slate-700 mb-1">No. WhatsApp admin</label>
+            <input
+              id="login-nohp" type="text" value={loginNoHp} onChange={(e) => setLoginNoHp(e.target.value)}
+              placeholder="cth. 62812xxxxxxx" required autoComplete="username"
+              className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-400"
+            />
+          </div>
+          <div>
+            <label htmlFor="login-pass" className="block text-xs font-medium text-slate-700 mb-1">Password</label>
+            <input
+              id="login-pass" type="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)}
+              placeholder="Password" required autoComplete="current-password"
+              className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-400"
+            />
+          </div>
           <button type="submit" disabled={loginBusy} className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold disabled:opacity-50">
             {loginBusy ? 'Memeriksa...' : 'Masuk'}
           </button>
@@ -458,9 +464,15 @@ function AdminApp() {
       <div className="flex-1 min-w-0 flex flex-col min-h-screen">
         <div className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 flex items-center justify-between shrink-0">
           <h1 className="font-display text-lg font-bold text-slate-900">{TAB_TITLES[activeTab]}</h1>
-          <div className="flex items-center gap-1.5 text-xs text-slate-500">
-            <span className={`w-2 h-2 rounded-full ${sheetsStatus?.workerOn ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-            <span>{sheetsStatus ? (sheetsStatus.workerOn ? `Sheets antre ${sheetsStatus.queueDepth ?? 0}` : 'Sheets mati') : 'Sheets…'}</span>
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <span className="hidden sm:inline tabular-nums">
+              {new Date().toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short' })}
+            </span>
+            <span className="hidden sm:inline w-px h-3.5 bg-slate-200" aria-hidden="true" />
+            <span className="flex items-center gap-1.5 tabular-nums" title="Status sinkronisasi Google Sheets">
+              <span className={`w-2 h-2 rounded-full ${sheetsStatus?.workerOn ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+              <span>{sheetsStatus ? (sheetsStatus.workerOn ? `Sheets antre ${sheetsStatus.queueDepth ?? 0}` : 'Sheets mati') : 'Sheets…'}</span>
+            </span>
           </div>
         </div>
         {loadError && (

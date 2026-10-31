@@ -52,8 +52,11 @@ const NavButton: React.FC<{
 }> = ({ active, onClick, icon: ItemIcon, label, badge }) => (
   <button
     onClick={onClick}
+    aria-current={active ? 'page' : undefined}
     className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition cursor-pointer ${
-      active ? 'bg-emerald-50 text-emerald-800 font-medium' : 'text-slate-600 hover:bg-slate-100'
+      active
+        ? 'bg-emerald-700 text-white font-semibold shadow-sm'
+        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
     }`}
   >
     <ItemIcon className="w-4 h-4 shrink-0" />
@@ -63,7 +66,7 @@ const NavButton: React.FC<{
 );
 
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <p className="px-3 pt-4 pb-1.5 text-[11px] font-semibold text-slate-400">{children}</p>
+  <p className="px-3 pt-4 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">{children}</p>
 );
 
 export const Header: React.FC<HeaderProps> = ({

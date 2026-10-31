@@ -119,11 +119,12 @@ const Stat: React.FC<{
   </div>
 );
 
-const Reveal: React.FC<{ children: React.ReactNode; delay?: number }> = ({ children, delay = 0 }) => {
+const Reveal: React.FC<{ children: React.ReactNode; delay?: number; className?: string }> = ({ children, delay = 0, className }) => {
   const reduce = useReducedMotion();
-  if (reduce) return <>{children}</>;
+  if (reduce) return <div className={className}>{children}</div>;
   return (
     <motion.div
+      className={className}
       initial={{ opacity: 0, y: 14 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, margin: '-80px' }}
@@ -308,8 +309,8 @@ export const PublicView: React.FC = () => {
             transition={{ duration: 0.55, delay: 0.12 }}
           >
             <img
-              src="/landing-sawah.jpg"
-              alt="Petani memotret sawah saat matahari terbenam"
+              src="/landing-hp.jpg"
+              alt="Petani memegang ponsel dan peti cabai merah di ladang"
               className="w-full aspect-[4/3] object-cover rounded-lg"
               loading="eager"
             />
@@ -378,32 +379,33 @@ export const PublicView: React.FC = () => {
           <Reveal>
             <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Yang dikerjakan Hai Tani</h2>
           </Reveal>
-          <div className="mt-8 grid md:grid-cols-3 gap-x-8 gap-y-10">
-            <Reveal delay={0.05}>
-              <div className="bg-emerald-900 rounded-lg p-6 h-full flex flex-col justify-between min-h-[220px]">
+          <div className="mt-8 grid md:grid-cols-3 gap-6">
+            <Reveal delay={0.05} className="md:col-span-2">
+              <div className="bg-emerald-950 rounded-lg p-6 md:p-8 h-full flex flex-col justify-between min-h-[240px]">
                 <div>
-                  <h3 className="font-bold text-white">Ketemu buyer langsung</h3>
-                  <p className="mt-1 text-sm text-emerald-200 leading-relaxed">
-                    Sampaikan butuh atau stok lewat chat, tawar harga, tutup deal. Tercatat di kas.
+                  <h3 className="text-lg font-bold text-white">Ketemu buyer langsung</h3>
+                  <p className="mt-1.5 text-sm text-emerald-200 leading-relaxed max-w-md">
+                    Fitur utama Hai Tani. Sampaikan butuh atau stok lewat chat, tawar harga,
+                    tutup deal. Tercatat di kas.
                   </p>
                 </div>
-                <p className="mt-4 text-4xl font-bold tabular-nums text-white">
+                <p className="mt-6 text-5xl font-bold tabular-nums text-white">
                   {(s?.deal ?? 0).toLocaleString('id-ID')}
                   <span className="ml-2 text-sm font-medium text-emerald-300">kesepakatan tercatat</span>
                 </p>
               </div>
             </Reveal>
-            <Reveal delay={0.1}>
-              <div>
+            <Reveal delay={0.1} className="h-full">
+              <div className="h-full flex flex-col">
                 <img
                   src="/landing-pasar.jpg"
                   alt="Los sayur di pasar tradisional"
-                  className="w-full aspect-[16/10] object-cover rounded-lg"
+                  className="w-full flex-1 min-h-[160px] object-cover rounded-lg"
                   loading="lazy"
                 />
                 <h3 className="mt-4 font-bold text-slate-900">Harga pasar live</h3>
                 <p className="mt-1 text-sm text-slate-600 leading-relaxed">
-                  SISKAPERBAPO Jatim per pasar plus Mantung Malang. Bandingkan sebelum jual.
+                  Sayur Mantung Malang dan buah InfoPangan DKI. Bandingkan sebelum jual.
                 </p>
               </div>
             </Reveal>
@@ -492,7 +494,35 @@ export const PublicView: React.FC = () => {
           </div>
         </section>
 
-        <section id="harga" className="max-w-7xl mx-auto px-4 sm:px-6 pb-16 md:pb-20 scroll-mt-20">
+        <section className="relative overflow-hidden">
+          <img
+            src="/landing-sawah.jpg"
+            alt="Teras sawah saat matahari terbit"
+            className="absolute inset-0 w-full h-full object-cover"
+            loading="lazy"
+          />
+          <div className="absolute inset-0 bg-emerald-950/85" aria-hidden="true" />
+          <div className="relative max-w-3xl mx-auto px-4 sm:px-6 py-16 md:py-20 text-center">
+            <Reveal>
+              <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white">
+                Dibuat oleh petani, untuk kesejahteraan petani.
+              </h2>
+              <div className="mt-8 divide-y divide-white/15 border-y border-white/15">
+                {[
+                  'Harga adil lewat pertemuan langsung petani dan buyer.',
+                  'Tanpa rantai tengkulak berlapis.',
+                  'Tanpa aplikasi baru. Cukup WhatsApp.',
+                ].map((line) => (
+                  <p key={line} className="py-4 text-base text-emerald-50 leading-relaxed">
+                    {line}
+                  </p>
+                ))}
+              </div>
+            </Reveal>
+          </div>
+        </section>
+
+        <section id="harga" className="max-w-7xl mx-auto px-4 sm:px-6 py-16 md:py-20 scroll-mt-20">
           <Reveal>
             <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Harga sayur dan buah</h2>
             <p className="mt-2 text-sm text-slate-500">Harga acuan pasar, diperbarui berkala dari sumber resmi.</p>
