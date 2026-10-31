@@ -373,7 +373,7 @@ function AdminApp() {
               className="absolute inset-0 w-full h-full object-cover"
             />
             <p className="absolute bottom-4 left-4 right-4 text-sm font-medium text-white bg-emerald-950/70 backdrop-blur rounded-lg px-3 py-2">
-              Dibuat oleh petani, untuk kesejahteraan petani.
+              Dari Petani, untuk Kesejahteraan Petani.
             </p>
           </div>
           <form onSubmit={handleLogin} className="p-8 space-y-4">
@@ -494,6 +494,8 @@ function AdminApp() {
               onRefreshData={loadData}
               loading={loading}
               onNavigateToSheets={() => setActiveTab('sheets')}
+              onNavigateToChat={() => setActiveTab('chat')}
+              onNavigateToMap={() => setActiveTab('map')}
             />
             <MarketPriceTable />
           </div>

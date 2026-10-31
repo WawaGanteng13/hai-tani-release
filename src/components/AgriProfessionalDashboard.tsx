@@ -50,6 +50,7 @@ import {
 } from 'recharts';
 import { FarmerRecord, MarketCommodity, StrategicRecommendation } from '../types';
 import { generateArchitecturePdf } from '../utils/generateArchitecturePdf';
+import { OperasiLapangan } from './OperasiLapangan';
 
 interface AgriProfessionalDashboardProps {
   farmers: FarmerRecord[];
@@ -456,13 +457,14 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
               <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center font-bold">
                 <TableIcon className="w-4 h-4" />
               </div>
-              <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-                <span>Dashboard Analitik Profesional Pertanian</span>
+              <h2 className="font-display text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                <span>Ruang Kendali Tani</span>
                 <span className="text-[11px] bg-emerald-950 text-emerald-300 border border-emerald-700/50 px-2.5 py-0.5 rounded-full font-mono flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  Google Sheet Connected
+                  Sheets Terhubung
                 </span>
               </h2>
+              <p className="text-xs text-emerald-300/90 font-medium">Dari Petani, untuk Kesejahteraan Petani.</p>
             </div>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300">
               <span className="flex items-center gap-1 text-slate-400">
@@ -489,7 +491,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
               title="Perbarui data terbaru dari Google Sheets"
             >
               <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${loading ? 'animate-spin' : ''}`} />
-              <span>{loading ? 'Sinkronisasi...' : 'Tarik Data Terbaru'}</span>
+              <span>{loading ? 'Sinkronisasi...' : 'Segarkan Data'}</span>
             </button>
 
             <button
@@ -497,12 +499,12 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
               className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition flex items-center space-x-1.5 cursor-pointer"
             >
               <ExternalLink className="w-3.5 h-3.5" />
-              <span>Buka Tampilan Spreadsheet</span>
+              <span>Buka Spreadsheet</span>
             </button>
 
             <button
               onClick={exportToCSV}
-              className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-sm transition flex items-center space-x-1.5 cursor-pointer"
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition flex items-center space-x-1.5 cursor-pointer"
               title="Ekspor data hasil filter ke file CSV"
             >
               <Download className="w-3.5 h-3.5" />
@@ -512,33 +514,36 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             {onNavigateToMap && (
               <button
                 onClick={onNavigateToMap}
-                className="px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold shadow-sm transition flex items-center space-x-1.5 cursor-pointer"
-                title="Buka Peta Spasial Sebaran Petani & Supplier di Google Maps"
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition flex items-center space-x-1.5 cursor-pointer"
+                title="Buka peta sebaran petani dan supplier"
               >
                 <MapPin className="w-3.5 h-3.5" />
-                <span>Peta Google Maps</span>
+                <span>Peta</span>
               </button>
             )}
 
             <button
               onClick={generateArchitecturePdf}
-              className="px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold shadow-sm transition flex items-center space-x-1.5 cursor-pointer"
-              title="Unduh Dokumen Digital Arsitektur & Spesifikasi Teknis TaniAI (Format PDF)"
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition flex items-center space-x-1.5 cursor-pointer"
+              title="Unduh spesifikasi teknis (PDF)"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Arsitektur &amp; Spek (PDF)</span>
+              <span>Spek Teknis (PDF)</span>
             </button>
 
             <button
               onClick={() => setShowExecutiveBriefing(!showExecutiveBriefing)}
-              className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-sm transition flex items-center space-x-1.5 cursor-pointer"
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition flex items-center space-x-1.5 cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5" />
-              <span>{showExecutiveBriefing ? 'Tutup Ringkasan' : 'Briefing Eksekutif'}</span>
+              <span>{showExecutiveBriefing ? 'Tutup Ringkasan' : 'Briefing Lapangan'}</span>
             </button>
           </div>
         </div>
       </div>
+
+      {/* Operasi Lapangan: siap panen, klinik tanaman, arus aktivitas */}
+      <OperasiLapangan farmers={farmers} onUjiChat={onNavigateToChat} />
 
       {/* Collapsible Executive Briefing Section */}
       {showExecutiveBriefing && (
@@ -547,7 +552,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <div className="flex items-center space-x-2">
               <Sparkles className="w-5 h-5 text-indigo-600" />
               <h3 className="font-bold text-sm sm:text-base text-slate-900">
-                Briefing Eksekutif Agronomis & Data Scientist (Siap Rapat)
+                Briefing Lapangan
               </h3>
             </div>
             <div className="flex items-center space-x-2">
@@ -570,7 +575,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
 
           <div className="bg-indigo-50/60 rounded-xl p-4 text-xs text-indigo-950 space-y-2 border border-indigo-100">
             <p className="font-semibold leading-relaxed">
-              Ringkasan Kebijakan Lapangan: Berdasarkan {totalFilteredFarmers} data petani aktif dengan luas akumulasi {totalFilteredLand.toFixed(1)} Ha, estimasi pasokan panen total mencapai {totalFilteredYield.toFixed(1)} Ton dengan valuasi ekonomi proyeksi Rp {totalFilteredValuation.toLocaleString('id-ID')}.
+              Ringkasan: {totalFilteredFarmers} petani aktif di {totalFilteredLand.toFixed(1)} Ha, proyeksi panen {totalFilteredYield.toFixed(1)} Ton senilai Rp {totalFilteredValuation.toLocaleString('id-ID')}.
             </p>
             <p className="text-indigo-800">
               {recommendation.ringkasanEksekutif}
@@ -581,7 +586,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
               <div className="font-bold text-rose-700 flex items-center space-x-1 mb-1.5">
                 <AlertTriangle className="w-4 h-4" />
-                <span>Risiko Volatilitas & Pasokan:</span>
+                <span>Risiko Pasar:</span>
               </div>
               <ul className="space-y-1 text-slate-600 list-disc list-inside">
                 {recommendation.analisisOversupplyShortage.slice(0, 2).map((item, idx) => (
@@ -605,7 +610,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
               <div className="font-bold text-blue-700 flex items-center space-x-1 mb-1.5">
                 <TrendingUp className="w-4 h-4" />
-                <span>Intervensi Rantai Pasok:</span>
+                <span>Rantai Pasok:</span>
               </div>
               <ul className="space-y-1 text-slate-600 list-disc list-inside">
                 {recommendation.rekomendasiRantaiPasok.slice(0, 2).map((item, idx) => (
@@ -622,7 +627,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
           <div className="flex items-center space-x-2">
             <Filter className="w-4 h-4 text-emerald-600" />
-            <h3 className="font-bold text-sm text-slate-800">Filter & Pengurutan Data Lahan Petani</h3>
+            <h3 className="font-bold text-sm text-slate-800">Saring Lahan</h3>
             <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-mono">
               Menampilkan {totalFilteredFarmers} dari {farmers.length} data
             </span>
@@ -658,7 +663,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
 
           {/* Filter 2: Wilayah / Kabupaten */}
           <div>
-            <label className="font-semibold text-slate-600 block mb-1">Wilayah / Kabupaten:</label>
+            <label className="font-semibold text-slate-600 block mb-1">Wilayah:</label>
             <select
               value={selectedRegion}
               onChange={(e) => setSelectedRegion(e.target.value)}
@@ -707,7 +712,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
 
           {/* Filter 5: Urutkan Berdasarkan */}
           <div>
-            <label className="font-semibold text-slate-600 block mb-1">Urutkan Berdasarkan:</label>
+            <label className="font-semibold text-slate-600 block mb-1">Urut:</label>
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as any)}
@@ -723,7 +728,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
 
           {/* Filter 6: Arah Pengurutan */}
           <div>
-            <label className="font-semibold text-slate-600 block mb-1">Arah Pengurutan:</label>
+            <label className="font-semibold text-slate-600 block mb-1">Arah:</label>
             <button
               onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
               className="w-full bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-800 font-medium flex items-center justify-between cursor-pointer transition"
@@ -742,7 +747,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Cari cepat petani berdasarkan nama, desa, varietas benih, atau catatan agronomi..."
+              placeholder="Cari nama, desa, atau komoditas..."
               className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none placeholder-slate-400"
             />
           </div>
@@ -754,7 +759,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
         {/* Card 1: Farmers Demographics */}
         <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
-            <span>Petani Terfilter</span>
+            <span>Petani</span>
             <div className="p-1 rounded-lg bg-emerald-50 text-emerald-700">
               <Users className="w-4 h-4" />
             </div>
@@ -770,7 +775,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
         {/* Card 2: Total Land Usage */}
         <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
-            <span>Total Penggunaan Lahan</span>
+            <span>Lahan Terdata</span>
             <div className="p-1 rounded-lg bg-blue-50 text-blue-700">
               <Layers className="w-4 h-4" />
             </div>
@@ -784,21 +789,21 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
         {/* Card 3: Estimated Harvest Yield */}
         <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
-            <span>Proyeksi Hasil Panen</span>
+            <span>Proyeksi Panen</span>
             <div className="p-1 rounded-lg bg-amber-50 text-amber-700">
               <Sprout className="w-4 h-4" />
             </div>
           </div>
           <div className="text-2xl font-black text-slate-900 font-mono">{totalFilteredYield.toFixed(1)} Ton</div>
           <div className="text-[11px] text-amber-600 font-medium mt-1">
-            Yield Rata-rata: {overallYieldPerHectare.toFixed(2)} Ton/Ha
+            Rata-rata: {overallYieldPerHectare.toFixed(2)} Ton/Ha
           </div>
         </div>
 
         {/* Card 4: Economic Valuation */}
         <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
-            <span>Valuasi Pasar Berdiri</span>
+            <span>Nilai Panen</span>
             <div className="p-1 rounded-lg bg-indigo-50 text-indigo-700">
               <Coins className="w-4 h-4" />
             </div>
@@ -816,7 +821,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
         {/* Card 5: Anomaly & Risk Watch */}
         <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
           <div className="flex justify-between items-center text-xs text-slate-500 mb-1">
-            <span>Indeks Anomali Pasar</span>
+            <span>Anomali Harga</span>
             <div className="p-1 rounded-lg bg-rose-50 text-rose-700">
               <AlertTriangle className="w-4 h-4" />
             </div>
@@ -825,7 +830,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             {commodities.filter((c) => c.statusAnomali === 'LONJAKAN_EKSTREM' || c.statusAnomali === 'PENURUNAN_DRASTIS').length}
           </div>
           <div className="text-[11px] text-rose-600 mt-1">
-            Perlu intervensi distribusi pangan
+            Perlu tindak lanjut
           </div>
         </div>
       </div>
@@ -838,10 +843,10 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <div>
               <h3 className="font-bold text-sm text-slate-800 flex items-center space-x-1.5">
                 <BarChart3 className="w-4 h-4 text-emerald-600" />
-                <span>Penggunaan Lahan (Ha) & Produktivitas Panen (Ton/Ha)</span>
+                <span>Lahan dan Produktivitas per Komoditas</span>
               </h3>
               <p className="text-[11px] text-slate-500">
-                Komparasi alokasi lahan terhadap densitas hasil per komoditas
+                Luas lawan hasil per komoditas
               </p>
             </div>
             <span className="text-[11px] font-mono bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded-full font-semibold">
@@ -887,9 +892,9 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <div>
               <h3 className="font-bold text-sm text-slate-800 flex items-center space-x-1.5">
                 <PieIcon className="w-4 h-4 text-indigo-600" />
-                <span>Distribusi Komoditas Tanaman</span>
+                <span>Komposisi Komoditas</span>
               </h3>
-              <p className="text-[11px] text-slate-500">Pangsa persentase alokasi luas lahan</p>
+              <p className="text-[11px] text-slate-500">Pangsa luas per komoditas</p>
             </div>
             <span className="text-[11px] font-mono bg-indigo-50 text-indigo-800 px-2 py-0.5 rounded-full font-semibold">
               Share Lahan %
@@ -936,10 +941,10 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <div>
               <h3 className="font-bold text-sm text-slate-800 flex items-center space-x-1.5">
                 <MapPin className="w-4 h-4 text-blue-600" />
-                <span>Demografi Spasial Petani & Luas Lahan per Wilayah</span>
+                <span>Petani dan Lahan per Wilayah</span>
               </h3>
               <p className="text-[11px] text-slate-500">
-                Pemetaan populasi petani dan agregat lahan di sentra produksi
+                Sebaran di sentra produksi
               </p>
             </div>
             <span className="text-[11px] font-mono bg-blue-50 text-blue-800 px-2 py-0.5 rounded-full font-semibold">
@@ -984,9 +989,9 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
           <div className="pb-2 border-b border-slate-100">
             <h3 className="font-bold text-sm text-slate-800 flex items-center space-x-1.5">
               <Users className="w-4 h-4 text-emerald-600" />
-              <span>Struktur Skala Petani</span>
+              <span>Skala Usaha Tani</span>
             </h3>
-            <p className="text-[11px] text-slate-500">Segmentasi luas garapan petani terdaftar</p>
+            <p className="text-[11px] text-slate-500">Gurem, menengah, komersial</p>
           </div>
 
           <div className="space-y-3 pt-1">
@@ -1024,10 +1029,10 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <div>
               <h3 className="font-bold text-sm text-slate-800 flex items-center space-x-1.5">
                 <Calendar className="w-4 h-4 text-amber-600" />
-                <span>Timeline Estimasi Panen & Deteksi Risiko Pasokan</span>
+                <span>Arus Panen per Bulan</span>
               </h3>
               <p className="text-[11px] text-slate-500">
-                Proyeksi tonase panen per bulan terhadap batas kapasitas serapan pasar
+                Tonase lawan daya serap pasar
               </p>
             </div>
             <span className="text-[11px] font-mono bg-amber-50 text-amber-800 px-2 py-0.5 rounded-full font-semibold">
@@ -1081,7 +1086,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <div>
               <h3 className="font-bold text-sm text-slate-800 flex items-center space-x-1.5">
                 <TrendingUp className="w-4 h-4 text-emerald-600" />
-                <span>Tren Harga Pasar vs HAP Pemerintah</span>
+                <span>Harga Pasar lawan HAP</span>
               </h3>
               <p className="text-[11px] text-slate-500">Benchmark harga spot terhadap Harga Acuan Pembelian</p>
             </div>
@@ -1173,10 +1178,10 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
           <div>
             <h3 className="font-bold text-sm text-slate-900 flex items-center space-x-2">
               <TableIcon className="w-4 h-4 text-emerald-600" />
-              <span>Data Riil Petani Terhubung ke Google Sheets</span>
+              <span>Lahan Petani</span>
             </h3>
             <p className="text-xs text-slate-500">
-              Menampilkan {sortedAndFilteredFarmers.length} baris spreadsheet terfilter &bull; Diurutkan berdasarkan{' '}
+              {sortedAndFilteredFarmers.length} baris terfilter &bull; Urut {' '}
               <span className="font-semibold text-slate-800">
                 {sortBy === 'yield'
                   ? 'Hasil Panen (Ton)'

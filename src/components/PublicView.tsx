@@ -505,7 +505,7 @@ export const PublicView: React.FC = () => {
           <div className="relative max-w-3xl mx-auto px-4 sm:px-6 py-16 md:py-20 text-center">
             <Reveal>
               <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white">
-                Dibuat oleh petani, untuk kesejahteraan petani.
+                Dari Petani, untuk Kesejahteraan Petani.
               </h2>
               <div className="mt-8 divide-y divide-white/15 border-y border-white/15">
                 {[
@@ -623,7 +623,7 @@ export const PublicView: React.FC = () => {
         </div>
         <div className="border-t border-slate-200">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap gap-x-6 gap-y-1 justify-between text-xs text-slate-400">
-            <span>Dibuat oleh petani, untuk kesejahteraan petani.</span>
+            <span>Dari Petani, untuk Kesejahteraan Petani.</span>
             <span>© 2026 Hai Tani.</span>
           </div>
         </div>

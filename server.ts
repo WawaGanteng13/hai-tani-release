@@ -6285,6 +6285,45 @@ export function createServerApp() {
     res.json(notificationsDb);
   });
 
+  // GET ringkasan aktivitas terakhir (umpan dasbor admin)
+  app.get("/api/aktivitas", requireSession(), (_req, res) => {
+    const teks = (e: any): string => {
+      const p = e?.payload || {};
+      const nama = p.nama || p.noHp || p.komoditas || e?.entityId || "";
+      const id = nama ? ` ${nama}` : "";
+      switch (`${e?.entity}:${e?.action}`) {
+        case "offer:deal": return `Kesepakatan${id}`;
+        case "offer:create": return `Penawaran baru${id}`;
+        case "commodity:price": return `Update harga${id}`;
+        case "farmer:create": return `Petani terdaftar${id}`;
+        case "farmer:update": return `Data petani diubah${id}`;
+        case "user:create": return `Pendaftaran${id}`;
+        case "cash:create": return `Kas tercatat${id}`;
+        default:
+          break;
+      }
+      switch (e?.action) {
+        case "deal": return `Kesepakatan${id}`;
+        case "flagged": return `Perlu perhatian${id}`;
+        case "followup": return `Tindak lanjut${id}`;
+        case "followup_fail": return `Tindak lanjut gagal${id}`;
+        case "ack": return `Konfirmasi${id}`;
+        case "budget": return `Anggaran${id}`;
+        case "close": return `Penutupan${id}`;
+        case "onboarded_weak": return `Pendaftaran parsial${id}`;
+        case "loc_draft": return `Draf lokasi${id}`;
+        case "create": return `${e?.entity || "Data"} baru${id}`;
+        case "update": return `${e?.entity || "Data"} diubah${id}`;
+        default: return `${e?.action || "?"}${id}`;
+      }
+    };
+    res.json(
+      (Array.isArray(eventsDb) ? eventsDb : [])
+        .slice(0, 25)
+        .map((e: any) => ({ ts: e?.ts || "", aksi: String(e?.action || ""), teks: teks(e) })),
+    );
+  });
+
   // GET strategic recommendations
   app.get("/api/strategic-recommendation", (_req, res) => {
     res.json(latestRecommendation);
