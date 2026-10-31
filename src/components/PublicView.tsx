@@ -10,6 +10,8 @@ import {
   AlertTriangle,
   RefreshCw,
   Lock,
+  Carrot,
+  Apple,
   MessageSquare,
   MapPin,
   IdCard,
@@ -166,11 +168,43 @@ const BENEFITS: Record<BenefitKey, { label: string; rows: string[] }> = {
   },
 };
 
+const PriceTicker: React.FC = () => {
+  const [items, setItems] = useState<Array<{ nama: string; harga: number; satuan: string }>>([]);
+
+  useEffect(() => {
+    fetch('/api/harga-pasar?sumber=mantung')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (j?.daftar?.length) setItems(j.daftar.slice(0, 12));
+      })
+      .catch(() => {});
+  }, []);
+
+  if (items.length === 0) return null;
+  const row = [...items, ...items];
+  return (
+    <div className="ticker border-b border-emerald-950 bg-emerald-950 overflow-hidden" aria-label="Harga sayur terkini">
+      <div className="ticker-track py-2.5">
+        {row.map((it, i) => (
+          <span key={i} className="flex items-center shrink-0">
+            <span className="px-5 text-sm text-emerald-50 whitespace-nowrap">
+              <span className="font-medium">{it.nama}</span>
+              <span className="ml-2 tabular-nums text-emerald-200">Rp{(it.harga ?? 0).toLocaleString('id-ID')}</span>
+            </span>
+            <span className="w-px h-4 bg-emerald-800" aria-hidden="true" />
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 export const PublicView: React.FC = () => {
   const [data, setData] = useState<PublikRingkas | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [benefitTab, setBenefitTab] = useState<BenefitKey>('petani');
+  const [hargaTab, setHargaTab] = useState<'sayur' | 'buah'>('sayur');
   const reduceMotion = useReducedMotion();
 
   const load = useCallback(async () => {
@@ -206,7 +240,7 @@ export const PublicView: React.FC = () => {
   const heroAnim = reduceMotion ? {} : { initial: { opacity: 0, y: 18 }, animate: { opacity: 1, y: 0 } };
 
   return (
-    <div className="min-h-screen bg-white font-sans text-slate-800 antialiased">
+    <div className="landing min-h-screen bg-white font-sans text-slate-800 antialiased">
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <a href="#atas" className="flex items-center gap-2.5 shrink-0">
@@ -216,10 +250,10 @@ export const PublicView: React.FC = () => {
             <span className="font-bold text-slate-900">Hai Tani</span>
           </a>
           <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600">
-            <a href="#tentang" className="hover:text-slate-900">Tentang</a>
-            <a href="#fitur" className="hover:text-slate-900">Fitur</a>
-            <a href="#harga" className="hover:text-slate-900">Harga</a>
-            <a href="#peta" className="hover:text-slate-900">Peta</a>
+            <a href="#tentang" className="link-directional hover:text-slate-900">Tentang</a>
+            <a href="#fitur" className="link-directional hover:text-slate-900">Fitur</a>
+            <a href="#harga" className="link-directional hover:text-slate-900">Harga</a>
+            <a href="#peta" className="link-directional hover:text-slate-900">Peta</a>
           </nav>
           <div className="flex items-center gap-2 shrink-0">
             <Link to="/admin" className="hidden sm:flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-900 px-3 py-2">
@@ -255,9 +289,10 @@ export const PublicView: React.FC = () => {
                 href={WA_CHAT_URL}
                 target="_blank"
                 rel="noreferrer"
-                className="text-sm font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg px-5 py-2.5 transition active:scale-[0.98]"
+                className="btn-swap text-sm font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg px-5 py-2.5 transition active:scale-[0.98]"
               >
-                Chat Kang Tani
+                <span className="swap-a">Chat Kang Tani</span>
+                <span className="swap-b" aria-hidden="true">Chat Kang Tani</span>
               </a>
               <a
                 href="#harga"
@@ -281,7 +316,9 @@ export const PublicView: React.FC = () => {
           </motion.div>
         </section>
 
-        <div className="border-y border-slate-200 bg-slate-50">
+        <PriceTicker />
+
+        <div className="border-b border-slate-200 bg-slate-50">
           <div className="max-w-7xl mx-auto px-2 sm:px-4 grid grid-cols-2 sm:grid-cols-5 sm:divide-x divide-slate-200">
             <Stat icon={Users} label="Petani terdata" value={s?.petani} loading={loading} />
             <Stat icon={Store} label="Kios mitra" value={s?.pemasok} loading={loading} />
@@ -307,8 +344,17 @@ export const PublicView: React.FC = () => {
         )}
 
         <section id="tentang" className="max-w-7xl mx-auto px-4 sm:px-6 py-16 md:py-20 scroll-mt-20">
-          <Reveal>
-            <div className="max-w-3xl">
+          <div className="grid md:grid-cols-2 gap-10 items-center">
+            <Reveal>
+              <img
+                src="/landing-panen.jpg"
+                alt="Petani menyerahkan peti cabai dan tomat ke buyer"
+                className="w-full aspect-[4/3] object-cover rounded-lg"
+                loading="lazy"
+              />
+            </Reveal>
+            <Reveal delay={0.08}>
+            <div>
               <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Apa itu Hai Tani</h2>
               <p className="mt-4 text-base text-slate-600 leading-relaxed">
                 Hai Tani, atau Kang Tani AI, dibuat oleh petani untuk kesejahteraan petani.
@@ -324,7 +370,8 @@ export const PublicView: React.FC = () => {
                 <ArrowRight className="w-4 h-4" />
               </a>
             </div>
-          </Reveal>
+            </Reveal>
+          </div>
         </section>
 
         <section id="fitur" className="max-w-7xl mx-auto px-4 sm:px-6 pb-16 md:pb-20 scroll-mt-20">
@@ -447,11 +494,54 @@ export const PublicView: React.FC = () => {
 
         <section id="harga" className="max-w-7xl mx-auto px-4 sm:px-6 pb-16 md:pb-20 scroll-mt-20">
           <Reveal>
-            <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Harga pasar hari ini</h2>
-            <p className="mt-2 text-sm text-slate-500">Cari komoditas untuk melihat harga acuan per pasar.</p>
+            <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Harga sayur dan buah</h2>
+            <p className="mt-2 text-sm text-slate-500">Harga acuan pasar, diperbarui berkala dari sumber resmi.</p>
+            <div className="mt-5 inline-flex rounded-lg border border-slate-300 bg-white p-1" role="tablist" aria-label="Kelompok harga">
+              <button
+                role="tab"
+                aria-selected={hargaTab === 'sayur'}
+                onClick={() => setHargaTab('sayur')}
+                className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition cursor-pointer ${
+                  hargaTab === 'sayur' ? 'bg-emerald-700 text-white' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Carrot className="w-4 h-4" />
+                Sayur
+              </button>
+              <button
+                role="tab"
+                aria-selected={hargaTab === 'buah'}
+                onClick={() => setHargaTab('buah')}
+                className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium transition cursor-pointer ${
+                  hargaTab === 'buah' ? 'bg-emerald-700 text-white' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Apple className="w-4 h-4" />
+                Buah
+              </button>
+            </div>
           </Reveal>
-          <div className="mt-6">
-            <MarketPriceTable />
+          <div className="mt-6" role="tabpanel">
+            {hargaTab === 'sayur' ? (
+              <MarketPriceTable sumber="mantung" badge="Pasar Mantung" title="Harga Sayur Terkini" />
+            ) : (
+              <div className="border border-slate-200 rounded-lg p-10 text-center">
+                <Apple className="w-8 h-8 text-slate-300 mx-auto" />
+                <p className="mt-3 text-base font-bold text-slate-900">Harga buah segera hadir</p>
+                <p className="mt-1 text-sm text-slate-500 max-w-md mx-auto">
+                  Sumber data buah masih disiapkan. Harga sayur di tab sebelah sudah live,
+                  atau tanya harga lewat chat.
+                </p>
+                <a
+                  href={WA_CHAT_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-4 inline-block text-sm font-semibold text-emerald-700 hover:text-emerald-800"
+                >
+                  Chat Kang Tani
+                </a>
+              </div>
+            )}
           </div>
         </section>
 
@@ -467,22 +557,33 @@ export const PublicView: React.FC = () => {
           <FarmerSupplierMapView farmers={farmers} suppliers={suppliers} hidePrivate />
         </section>
 
-        <section className="bg-emerald-900">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-14 md:py-16 flex flex-col md:flex-row md:items-center gap-6 md:gap-10">
-            <h2 className="flex-1 text-2xl md:text-3xl font-bold tracking-tight text-white">
-              Siap jual langsung ke buyer?
-            </h2>
-            <div className="shrink-0">
+        <section className="bg-emerald-950">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-14 md:py-16 grid md:grid-cols-2 gap-10 items-center">
+            <Reveal>
+              <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white">
+                Siap jual langsung ke buyer?
+              </h2>
+              <p className="mt-3 text-sm text-emerald-200 leading-relaxed max-w-md">
+                Kios dan buyer sudah menunggu di peta. Gratis, cukup nomor WhatsApp aktif.
+              </p>
               <a
                 href={WA_CHAT_URL}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-block text-sm font-semibold text-emerald-900 bg-white hover:bg-emerald-50 rounded-lg px-6 py-3 transition active:scale-[0.98]"
+                className="btn-swap mt-6 text-sm font-semibold text-emerald-950 bg-white hover:bg-emerald-50 rounded-lg px-6 py-3 transition active:scale-[0.98]"
               >
-                Chat Kang Tani
+                <span className="swap-a">Chat Kang Tani</span>
+                <span className="swap-b" aria-hidden="true">Chat Kang Tani</span>
               </a>
-              <p className="mt-2 text-xs text-emerald-200">Gratis, cukup nomor WhatsApp aktif.</p>
-            </div>
+            </Reveal>
+            <Reveal delay={0.08}>
+              <img
+                src="/landing-kios.jpg"
+                alt="Pemilik kios saprodi di tokonya"
+                className="w-full aspect-[4/3] object-cover rounded-lg"
+                loading="lazy"
+              />
+            </Reveal>
           </div>
         </section>
       </main>
@@ -506,7 +607,10 @@ export const PublicView: React.FC = () => {
           </nav>
         </div>
         <div className="border-t border-slate-200">
-          <p className="max-w-7xl mx-auto px-4 sm:px-6 py-4 text-xs text-slate-400">© 2026 Hai Tani.</p>
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap gap-x-6 gap-y-1 justify-between text-xs text-slate-400">
+            <span>Dibuat oleh petani, untuk kesejahteraan petani.</span>
+            <span>© 2026 Hai Tani.</span>
+          </div>
         </div>
       </footer>
     </div>

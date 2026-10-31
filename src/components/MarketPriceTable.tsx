@@ -24,7 +24,11 @@ interface HargaPasarResponse {
 
 const formatRp = (n: number) => `Rp ${n.toLocaleString('id-ID')}`;
 
-export const MarketPriceTable: React.FC = () => {
+export const MarketPriceTable: React.FC<{ sumber?: string; badge?: string; title?: string }> = ({
+  sumber = '',
+  badge = 'SISKAPERBAPO',
+  title = 'Harga Pasar Jatim Terkini',
+}) => {
   const [data, setData] = useState<HargaPasarResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -39,7 +43,7 @@ export const MarketPriceTable: React.FC = () => {
       setError(null);
     }
     try {
-      const res = await fetch('/api/harga-pasar');
+      const res = await fetch(sumber ? `/api/harga-pasar?sumber=${encodeURIComponent(sumber)}` : '/api/harga-pasar');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json: HargaPasarResponse = await res.json();
       setData(json);
@@ -75,9 +79,9 @@ export const MarketPriceTable: React.FC = () => {
           </div>
           <div className="min-w-0">
             <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2 flex-wrap">
-              <span>Harga Pasar Jatim Terkini</span>
+              <span>{title}</span>
               <span className="bg-emerald-100 text-emerald-800 text-xs px-2.5 py-0.5 rounded-full font-medium border border-emerald-200">
-                SISKAPERBAPO
+                {badge}
               </span>
             </h2>
             <p className="text-xs text-slate-500">
@@ -135,7 +139,7 @@ export const MarketPriceTable: React.FC = () => {
             <AlertTriangle className="w-6 h-6 text-rose-600 mx-auto mb-2" />
             <p className="text-sm font-semibold text-slate-900">Gagal memuat harga pasar</p>
             <p className="text-xs text-slate-500 mt-1">
-              Sumber SISKAPERBAPO tidak menjawab ({error}). Periksa koneksi lalu coba lagi.
+              Sumber {badge} tidak menjawab ({error}). Periksa koneksi lalu coba lagi.
             </p>
             <button
               type="button"
@@ -150,7 +154,7 @@ export const MarketPriceTable: React.FC = () => {
             <Database className="w-6 h-6 text-slate-400 mx-auto mb-2" />
             <p className="text-sm font-semibold text-slate-900">Belum ada data harga</p>
             <p className="text-xs text-slate-500 mt-1">
-              Tabel SISKAPERBAPO kosong untuk tanggal {data.tanggal}. Coba muat ulang.
+              Tabel {badge} kosong untuk tanggal {data.tanggal}. Coba muat ulang.
             </p>
             <button
               type="button"

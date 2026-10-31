@@ -364,12 +364,23 @@ function AdminApp() {
   if (!me && !loading) {
     return (
       <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans">
-        <form onSubmit={handleLogin} className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 w-full max-w-sm space-y-4">
+        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-3xl grid md:grid-cols-2 overflow-hidden">
+          <div className="relative hidden md:block">
+            <img
+              src="/landing-sawah.jpg"
+              alt="Petani memotret sawah saat matahari terbenam"
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+            <p className="absolute bottom-4 left-4 right-4 text-sm font-medium text-white bg-emerald-950/70 backdrop-blur rounded-lg px-3 py-2">
+              Dibuat oleh petani, untuk kesejahteraan petani.
+            </p>
+          </div>
+          <form onSubmit={handleLogin} className="p-8 space-y-4">
           <div className="text-center">
             <div className="w-11 h-11 mx-auto mb-2 rounded-xl bg-emerald-700 flex items-center justify-center">
               <Sprout className="w-6 h-6 text-white" />
             </div>
-            <h1 className="font-bold text-slate-900 text-lg">TaniAI Dashboard</h1>
+            <h1 className="font-display font-bold text-slate-900 text-lg">Hai Tani</h1>
             <p className="text-xs text-slate-500">Masuk dengan nomor admin + password</p>
           </div>
           {loginError && (
@@ -389,7 +400,8 @@ function AdminApp() {
             {loginBusy ? 'Memeriksa...' : 'Masuk'}
           </button>
           <Link to="/publik" className="block text-[11px] text-emerald-700 hover:text-emerald-900 text-center">Lihat halaman publik tanpa login</Link>
-        </form>
+          </form>
+        </div>
       </div>
     );
   }
@@ -444,7 +456,7 @@ function AdminApp() {
 
       <div className="flex-1 min-w-0 flex flex-col min-h-screen">
         <div className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 flex items-center justify-between shrink-0">
-          <h1 className="text-lg font-bold text-slate-900">{TAB_TITLES[activeTab]}</h1>
+          <h1 className="font-display text-lg font-bold text-slate-900">{TAB_TITLES[activeTab]}</h1>
           <div className="flex items-center gap-1.5 text-xs text-slate-500">
             <span className={`w-2 h-2 rounded-full ${sheetsStatus?.workerOn ? 'bg-emerald-500' : 'bg-slate-300'}`} />
             <span>{sheetsStatus ? (sheetsStatus.workerOn ? `Sheets antre ${sheetsStatus.queueDepth ?? 0}` : 'Sheets mati') : 'Sheets…'}</span>
