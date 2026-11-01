@@ -113,6 +113,10 @@ Hai Tani's farm activity logs are built to become carbon value. This is our hope
 
 Farmers: log every unburned residue, every kilogram of fertilizer saved, every tree planted. Full intent, architecture, and data-gap plan: [docs/carbon-roadmap.md](docs/carbon-roadmap.md).
 
+## Business Flow
+
+Hai Tani sits in the middle of six parties — farmers, buyers, agri shops, government, banks, universities - connecting both sides, keeping farm records, and orchestrating deals through a licensed partner escrow (Hai Tani never holds funds: escrow needs an OJK license). Full ecosystem map and money flow: [docs/business-flow.md](docs/business-flow.md).
+
 ## Founder
 
 Founder statement:
