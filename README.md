@@ -119,8 +119,9 @@ Terverifikasi independen:
 
 - Akun https://www.instagram.com/sns.nursery = "SnS Nursery", Batu – Jawa Timur; bio: kirim worldwide, request via DM (2.236 followers saat fetch).
 - Invoice 19/12/2021 — https://www.scribd.com/document/827076449/Invoice-Tal-011221 membuktikan SNS Nursery Batu aktif jual tanaman hias minimal sejak Des 2021.
+- Profil https://www.facebook.com/Blokir88 menampilkan nama "Setiawan Putra" (isi profil selebihnya butuh login).
 
-Belum terverifikasi publik: kaitan nama founder dengan akun tersebut, klaim durasi 6 tahun, dan URL Facebook spesifik (butuh bukti langsung dari founder).
+Belum terverifikasi publik: kaitan nama founder dengan akun nursery tersebut dan klaim durasi 6 tahun (butuh bukti langsung seperti bio/tangkapan layar yang menyebut keduanya).
 
 ## Arsitektur (singkat)
 
