@@ -61,13 +61,13 @@ Details: [docs/negotiation-flow.md](docs/negotiation-flow.md).
 - WA chatbot simulator + voice-note player for low-text-literacy farmers (WhatsAppChatbot.tsx).
 - WhatsApp webhook + stateless anti-loop forwarder supporting text/button/location/voice-image-document media (server.ts, api/webhook/whatsapp.ts).
 - Multi-provider AI dispatcher + rule-based fallback when all providers are down (server.ts).
-- Multimodal AI service for voice transcription and image/document vision (server.ts).
+- Multimodal AI service for voice transcription and image/document vision; photo diagnosis runs an agentic loop (vision → verified-reference match → clarifying question → saved case DG-xxx), not one-shot labeling (server.ts).
 - Write-behind spreadsheet sync: Farmer/Supplier/Cash/Stock tabs + commodities/feedback, status and sync-now endpoints, plus CSV/XLSX export (lib/sheets-sync.ts, server.ts).
 - Online spreadsheet connector: list, create new spreadsheet, read metadata (workspace service module).
 - Spatial farmer/supplier map + Haversine distance (FarmerSupplierMapView.tsx).
 - Farmer/supplier CRUD + add modals + sync-status toasts (App.tsx).
 - Market prices + anomaly detection/EWS + notification broadcast + fruit price management (MarketAnomalyView.tsx, MarketPriceTable, FruitPriceManager).
-- Data scientist portal + agronomy fertilizer recommendation calculator (DataScientistPortal, lib agronomy).
+- Data scientist portal + agronomy fertilizer recommendation calculator with verified-reference citations ([REF-xxx] + PPL escalation) from a curated corpus (DataScientistPortal, lib agronomy, src/data/referensi_pertanian.ts).
 - Laya stdlib intent sidecar (8 intents: daftar_lahan through lain) + status endpoint (laya_sidecar.py, App.tsx).
 - Registration Card PDF + QR + architecture whitepaper PDF (qrcode, generateArchitecturePdf).
 - Media upload + append-only training event log (multer, data/training/*.jsonl).
@@ -104,7 +104,7 @@ Note: actual adoption (registered farmers/buyers, negotiation volume) has no dat
 
 - 2023 agritech spend TOM: USD 885.7M ≈ Rp14.0T (cross-check USD 500M ≈ Rp7.9T) → Rp7.9-14.0T range; 2033 projection ≈ Rp48.0T; AI-in-agriculture sub-segment 2025 ≈ Rp2.2T. Sources: https://www.kdmarketinsights.com/reports/indonesia-agritech-market/7611 , https://startuprise.org/agritech-startups-of-indonesia-2024/ , https://mobilityforesights.com/product/indonesia-artificial-intelligence-in-agriculture-market
 - WA-reachable farmer SAM (upper bound): 29.34M farm businesses × 79.5% × 90% ≈ 21.0M farmers × Rp100-300K/year ARPU ≈ Rp2.1-6.3T/year. Basis: Agricultural Census, APJII, WA data above. ARPU = author assumption, needs field validation.
-- 3-5 year SOM (Java-Sumatra, horticulture): assumed 1-3% share of SAM → Rp21-189M/year (subscription). Benchmark: Sayurbox ~1M customers, >10,000 partner farmers, $120M Series C — https://startuprise.org/agritech-startups-of-indonesia-2024/
+- 3-5 year SOM (Java-Sumatra, horticulture): assumed 1-3% share of SAM → Rp21-189 miliar/year (subscription). Benchmark: Sayurbox ~1M customers, >10,000 partner farmers, $120M Series C — https://startuprise.org/agritech-startups-of-indonesia-2024/
 - Full figures + assumptions: [docs/market-TOM-SAM-SOM.md](docs/market-TOM-SAM-SOM.md).
 
 ## Carbon Roadmap (next goal)

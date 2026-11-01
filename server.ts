@@ -45,6 +45,7 @@ import {
   AffiliateSale,
 } from "./src/types";
 import { calculateFertilizerRecommendation } from "./src/utils/agronomy";
+import { REFERENSI_PERTANIAN } from "./src/data/referensi_pertanian";
 import { nextId } from "./lib/next-id";
 import { nextSheetRow } from "./lib/sheet-row";
 import { initSheetsSync, enqueueSheetSync, drainSheetsQueue, getSheetsStatus, getSheetsRemote } from "./lib/sheets-sync";
@@ -3167,6 +3168,53 @@ Kembalikan HANYA format JSON valid tanpa tanda markdown:
     extracted: { ...scrubUnmentionedEstimates(parsed.extracted, parsed.transcription || ""), ...(ruleBased.extracted || {}) },
   };
 }
+// ---- Asisten agronomi agenik: retrieval korpus terverifikasi ----
+// Pola: keyword-gated (tanpa embedding) -> top-2 entri -> sitasi [REF-xxx] +
+// eskalasi PPL. Dipakai Q&A chat (via callUniversalAI), kalkulator pupuk,
+// dan langkah kedua analisis foto. Bukan RAG vektor; korpus starter dikurasi.
+const REF_GATE_RE = /hama|penyakit|wereng|ulat|tikus|keong|jamur|cendawan|virus|bakteri|gulma|pupuk|dosis|obat|insektisida|fungisida|herbisida|tanaman|sawah|kebun|lahan|panen|padi|jagung|cabai|cabe|bawang|kedelai|agave|daun|akar|buah|bunga|layu|busuk|bercak|kuning|kerdil|keriting/i;
+type RefHit = { ref: (typeof REFERENSI_PERTANIAN)[number]; skor: number };
+function cariReferensiTani(teks: string, topN = 2): Array<(typeof REFERENSI_PERTANIAN)[number]> {
+  try {
+    const t = String(teks || "").toLowerCase();
+    if (!REF_GATE_RE.test(t)) return [];
+    const scored: RefHit[] = REFERENSI_PERTANIAN.map((r) => {
+      let skor = 0;
+      for (const k of r.kunci) if (k && t.includes(k.toLowerCase())) skor += 3;
+      for (const c of r.komoditas) if (c && t.includes(c.toLowerCase())) skor += 2;
+      return { ref: r, skor };
+    }).filter((x) => x.skor >= 3).sort((a, b) => b.skor - a.skor);
+    return scored.slice(0, Math.max(1, topN)).map((x) => x.ref);
+  } catch {
+    return [];
+  }
+}
+const PPL_LINE = "🙏 Pastikan konfirmasi ke PPL/dinas setempat sebelum aplikasi.";
+function blokReferensiLLM(tanya: string): string {
+  const hits = cariReferensiTani(tanya, 2);
+  if (hits.length === 0) return "";
+  const daftar = hits.map((h) => `[${h.id}] ${h.judul} — ${h.isi} (Sumber: ${h.sumber})`).join("\n");
+  return `[REFERENSI TERVERIFIKASI — pakai bila relevan dengan pertanyaan; jawab sebagai asisten agronomi: cantumkan kode [REF-xxx] tiap fakta dosis/produk, JANGAN mengarang dosis di luar referensi; tutup saran tanaman dengan: "${PPL_LINE}" Bila tak relevan, abaikan blok ini.]\n${daftar}`;
+}
+function rujukanPupuk(crop: string): string {
+  const hits = cariReferensiTani(`pupuk ${crop} dosis`, 2).filter((h) => h.kategori === "pupuk");
+  if (hits.length === 0) return "";
+  return `\n\n📚 *Rujukan terverifikasi:*\n` + hits.map((h) => `• [${h.id}] ${h.judul} (${h.sumber})`).join("\n") + `\n${PPL_LINE}`;
+}
+// ---- Rekam kasus diagnosa foto (loop agenik: analisis -> padanan -> tindak lanjut) ----
+const DIAGNOSA_FILE = path.join(DATA_DIR, "diagnosa_db.json");
+function simpanKasusDiagnosa(c: { farmerId?: string; senderHash?: string; mediaPath?: string; ringkasan: string; matchIds: string[]; status: string }): string {
+  try {
+    const arr = readJsonSafe<any[]>(DIAGNOSA_FILE, [], "diagnosa_db.json");
+    const list = Array.isArray(arr) ? arr : [];
+    const id = nextId("DG", list.map((x) => x?.id).filter(Boolean));
+    list.unshift({ id, ts: new Date().toISOString(), farmerId: c.farmerId || "", senderHash: c.senderHash || "", mediaPath: c.mediaPath || "", ringkasan: String(c.ringkasan || "").slice(0, 500), matchIds: c.matchIds || [], status: c.status });
+    writeJsonAtomic(DIAGNOSA_FILE, list, "diagnosa_db.json");
+    return id;
+  } catch {
+    return "";
+  }
+}
 async function analyzeImageBuffer(buf: Buffer, mime: string, caption = ""): Promise<string> {
   const ai = getGemini();
   if (!ai) throw new Error("kunci AI belum valid");
@@ -4452,6 +4500,9 @@ async function callUniversalAI(
       text: (h.text || "").length > 200 ? (h.text || "").slice(0, 200) + "..." : h.text,
     }));
 
+  // Grounding korpus terverifikasi: tanpa hit => prompt utuh tak berubah.
+  const refCtxAgro = blokReferensiLLM(userPrompt);
+  const userAugmented = refCtxAgro ? `${refCtxAgro}\n\nPERTANYAAN (patuhi blok referensi di atas):\n"${userPrompt}"` : userPrompt;
   // Bangun messages OpenAI-compatible sekali; dipakai Meta, NIM & 9Router
   const chatMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
   if (systemPrompt) {
@@ -4463,7 +4514,7 @@ async function callUniversalAI(
       content: h.text,
     });
   }
-  chatMessages.push({ role: "user", content: userPrompt });
+  chatMessages.push({ role: "user", content: userAugmented });
 
   // 1. Meta Model API (Muse Spark) bila dikonfigurasi — prioritas untuk hackathon.
   // Gagal-cepat 2.5 dtk: endpoint sering timeout; budget forwarder WA hanya 8 dtk.
@@ -4532,7 +4583,7 @@ async function callUniversalAI(
           {
             text: `${systemPrompt}\n\n${
               historyFormatted ? `RIWAYAT PERCAKAPAN SINGKAT:\n${historyFormatted}\n\n` : ""
-            }PERTANYAAN PENGGUNA:\n"${userPrompt}"`,
+            }PERTANYAAN PENGGUNA:\n"${userAugmented}"`,
           },
         ],
       },
@@ -5786,6 +5837,19 @@ export function createServerApp() {
         });
       }
       if (!analysis.trim()) analysis = "🖼️ Foto diterima tapi belum bisa dianalisis. Coba kirim foto yang lebih jelas.";
+      // Langkah 2-3 loop agenik: padanan referensi + simpan kasus (bukan one-shot).
+      const diagHits = cariReferensiTani(`${analysis} ${String(caption || "")}`, 1);
+      const diagText = diagHits.length > 0
+        ? `\n\n🔎 *Padanan referensi:* [${diagHits[0].id}] *${diagHits[0].judul}* — ${String(diagHits[0].isi).split(". ")[0]}.\n(Sumber: ${diagHits[0].sumber})\n${PPL_LINE}`
+        : `\n\n❓ Belum ada padanan pasti di tabel referensi. Gejalanya di daun tua atau pucuk, dan sejak kapan muncul? Balas detailnya, saya cocokkan lagi.`;
+      const diagId = simpanKasusDiagnosa({
+        farmerId: (typeof farmerHit !== "undefined" && farmerHit ? (farmerHit as any).id : "") || "",
+        senderHash: hashPhone(String(senderPhone || "")),
+        mediaPath, ringkasan: clipText(analysis, 500),
+        matchIds: diagHits.map((d) => d.id),
+        status: diagHits.length > 0 ? "cocok-referensi" : "butuh-info",
+      });
+      analysis = `${analysis}${diagText}${diagId ? `\n\n🗂️ Kasus tercatat sebagai \`${diagId}\`.` : ""}`;
       trainingLog({ ...mBase, caption: String(caption || "").slice(0, 500), analysis: clipText(analysis), ok: true, ms: Date.now() - t0m });
       return res.json({
         ok: true, kind, analysis, savedMedia: mediaPath,
@@ -6937,7 +7001,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       `📦 *Total Kebutuhan Pupuk:*\n${pupukLines}\n\n` +
       `📅 *Jadwal & Fase Pemupukan:*\n${jadwalLines}\n\n` +
       `💡 *Petunjuk Agronomi Lapangan:*\n${tipsLines}\n\n` +
-      `💡 *Catatan:* Dosis dapat disesuaikan dengan uji tanah (PUTS) setempat. Bapak/Ibu juga dapat mencetak Surat Registrasi Lahan & Petani lengkap dengan tabel dosis ini.`;
+      `💡 *Catatan:* Dosis dapat disesuaikan dengan uji tanah (PUTS) setempat. Bapak/Ibu juga dapat mencetak Surat Registrasi Lahan & Petani lengkap dengan tabel dosis ini.` + rujukanPupuk(crop);
 
     return {
       reply,
