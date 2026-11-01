@@ -8,6 +8,7 @@ import { GoogleSheetsView } from './components/GoogleSheetsView';
 import { MarketAnomalyView } from './components/MarketAnomalyView';
 import { MarketPriceTable } from './components/MarketPriceTable';
 import { FruitPriceManager } from './components/FruitPriceManager';
+import { KemitraanView } from './components/KemitraanView';
 import { DataScientistPortal } from './components/DataScientistPortal';
 import { FarmerSupplierMapView } from './components/FarmerSupplierMapView';
 import { WebhookModal } from './components/WebhookModal';
@@ -34,10 +35,11 @@ const TAB_TITLES = {
   market: 'Harga & Anomali',
   datascientist: 'Data Scientist',
   map: 'Peta',
+  kemitraan: 'Kemitraan',
 } as const;
 
 function AdminApp() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map' | 'kemitraan'>('dashboard');
   const [farmers, setFarmers] = useState<FarmerRecord[]>(INITIAL_FARMERS);
   const [commodities, setCommodities] = useState<MarketCommodity[]>(INITIAL_COMMODITIES);
   const [notifications, setNotifications] = useState<AnomalyNotification[]>(INITIAL_NOTIFICATIONS);
@@ -499,6 +501,15 @@ function AdminApp() {
             />
             <MarketPriceTable />
           </div>
+        )}
+
+        {activeTab === 'kemitraan' && (
+          <KemitraanView
+            farmers={farmers}
+            suppliers={suppliers}
+            requesterNoHp={operatorNoHp()}
+            onToast={showToast}
+          />
         )}
 
         {activeTab === 'chat' && (

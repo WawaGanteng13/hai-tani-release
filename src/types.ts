@@ -206,7 +206,27 @@ export interface Offer {
   status: OfferStatus;
   lines: OfferLine[];
   spreadTotalRp?: number;
+  namaBuyer?: string;
+  followupAt?: string;
+  catatan?: string;
   kasId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Kebutuhan saprodi petani (needs_db.json, NDB-xxx). Dihubungkan ke
+// supplier/kios mitra terdekat; status dikelola dari tab Kemitraan.
+export type NeedStatus = 'BARU' | 'DIHUBUNGKAN' | 'TERPENUHI' | 'BATAL';
+export type NeedKategori = 'PUPUK' | 'OBAT' | 'BIBIT' | 'LAINNYA';
+export interface FarmerNeed {
+  id: string;
+  farmerId: string;
+  kategori: NeedKategori;
+  item: string;
+  jumlah?: string;
+  status: NeedStatus;
+  supplierId?: string;
+  catatan?: string;
   createdAt: string;
   updatedAt: string;
 }

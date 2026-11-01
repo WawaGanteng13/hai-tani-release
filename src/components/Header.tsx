@@ -14,9 +14,10 @@ import {
   FileText,
   LogOut,
   Globe,
+  Handshake,
 } from 'lucide-react';
 
-export type AdminTab = 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map';
+export type AdminTab = 'dashboard' | 'chat' | 'sheets' | 'market' | 'datascientist' | 'map' | 'kemitraan';
 
 type Icon = React.ComponentType<{ className?: string }>;
 
@@ -41,6 +42,7 @@ const NAV_MAIN: Array<{ id: AdminTab; label: string; icon: Icon }> = [
   { id: 'sheets', label: 'Data', icon: Table },
   { id: 'market', label: 'Harga & Anomali', icon: TrendingUp },
   { id: 'map', label: 'Peta', icon: MapPin },
+  { id: 'kemitraan', label: 'Kemitraan', icon: Handshake },
 ];
 
 const NavButton: React.FC<{

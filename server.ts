@@ -34,6 +34,9 @@ import {
   OfferLine,
   OfferStatus,
   FruitPrice,
+  FarmerNeed,
+  NeedStatus,
+  NeedKategori,
   FeedbackRecord,
   FeedbackKategori,
   DocumentRecord,
@@ -531,7 +534,9 @@ const FEEDBACK_FILE = path.join(DATA_DIR, "feedback_db.json");
 const FEEDBACK_CSV = path.join(DATA_DIR, "feedback_db.csv");
 const DOCUMENTS_FILE = path.join(DATA_DIR, "documents_db.json");
 const FRUIT_FILE = path.join(DATA_DIR, "fruit_db.json");
+const NEEDS_FILE = path.join(DATA_DIR, "needs_db.json");
 let fruitPricesDb: FruitPrice[] = [];
+let needsDb: FarmerNeed[] = [];
 const PRODUCTS_FILE = path.join(DATA_DIR, "products_db.json");
 const AFFILIATE_FILE = path.join(DATA_DIR, "affiliate_db.json");
 
@@ -645,6 +650,11 @@ function initPersistence() {
     if (Array.isArray(buhData) && buhData.length > 0) {
       fruitPricesDb = buhData as FruitPrice[];
       console.log(`[Storage] Berhasil memuat ${fruitPricesDb.length} harga buah admin dari disk (${FRUIT_FILE})`);
+    }
+    const ndData = readJsonSafe<unknown>(NEEDS_FILE, [], "needs_db.json");
+    if (Array.isArray(ndData) && ndData.length > 0) {
+      needsDb = ndData as FarmerNeed[];
+      console.log(`[Storage] Berhasil memuat ${needsDb.length} kebutuhan saprodi dari disk (${NEEDS_FILE})`);
     }
     const affData = readJsonSafe<unknown>(AFFILIATE_FILE, [], "affiliate_db.json");
     if (Array.isArray(affData) && affData.length > 0) {
@@ -997,6 +1007,19 @@ function nextFruitId(): string {
     if (m) n = Math.max(n, Number(m[1]));
   }
   return `BUH-${String(n + 1).padStart(3, "0")}`;
+}
+
+function saveNeedsToDisk() {
+  writeJsonAtomic(NEEDS_FILE, needsDb, "needs_db.json");
+}
+
+function nextNeedId(): string {
+  let n = 0;
+  for (const r of needsDb) {
+    const m = /^NDB-(\d+)$/.exec(r.id || "");
+    if (m) n = Math.max(n, Number(m[1]));
+  }
+  return `NDB-${String(n + 1).padStart(3, "0")}`;
 }
 
 // Harga buah: live InfoPangan DKI Jakarta (API publik, cache 30 mnt) digabung
@@ -6174,6 +6197,114 @@ export function createServerApp() {
     }
     const [gone] = fruitPricesDb.splice(ix, 1);
     saveFruitToDisk();
+    bumpDataVersion();
+    res.json({ deleted: gone.id });
+  });
+
+  // Kemitraan: daftar penawaran buyer (baca; tulis hanya catatan admin).
+  app.get("/api/offers", requireSession(), (_req, res) => {
+    res.json(offersDb);
+  });
+  app.patch("/api/offers/:id", requireSession(), (req, res) => {
+    const gate = requireRequesterAdmin(req.body);
+    if (!gate.ok) {
+      return res.status(403).json({ error: gate.error });
+    }
+    const id = String(req.params.id || "").toUpperCase();
+    const o = offersDb.find((x) => x.id.toUpperCase() === id);
+    if (!o) {
+      return res.status(404).json({ error: "Penawaran tidak ditemukan." });
+    }
+    // Status/lines milik mesin negosiasi chat; admin hanya boleh mencatat.
+    if (req.body?.namaBuyer !== undefined) o.namaBuyer = String(req.body.namaBuyer || "").trim().slice(0, 60) || undefined;
+    if (req.body?.catatan !== undefined) o.catatan = String(req.body.catatan || "").trim().slice(0, 300) || undefined;
+    if (req.body?.followupAt !== undefined) {
+      o.followupAt = req.body.followupAt === "now" ? new Date().toISOString() : undefined;
+    }
+    saveOffersToDisk();
+    bumpDataVersion();
+    res.json(o);
+  });
+
+  const NEED_KAT = ["PUPUK", "OBAT", "BIBIT", "LAINNYA"];
+  const NEED_ST = ["BARU", "DIHUBUNGKAN", "TERPENUHI", "BATAL"];
+  app.get("/api/farmer-needs", requireSession(), (_req, res) => {
+    res.json(needsDb);
+  });
+  app.post("/api/farmer-needs", requireSession(), (req, res) => {
+    const gate = requireRequesterAdmin(req.body);
+    if (!gate.ok) {
+      return res.status(403).json({ error: gate.error });
+    }
+    const farmerId = String(req.body?.farmerId || "").trim();
+    const kategori = String(req.body?.kategori || "").toUpperCase();
+    const item = String(req.body?.item || "").trim().slice(0, 80);
+    const jumlah = String(req.body?.jumlah || "").trim().slice(0, 30) || undefined;
+    const catatan = String(req.body?.catatan || "").trim().slice(0, 300) || undefined;
+    if (!farmersDb.some((f) => f.id === farmerId)) {
+      return res.status(400).json({ error: "farmerId tidak dikenal." });
+    }
+    if (!NEED_KAT.includes(kategori) || !item) {
+      return res.status(400).json({ error: "kategori (PUPUK/OBAT/BIBIT/LAINNYA) + item wajib." });
+    }
+    const now = new Date().toISOString();
+    const rec: FarmerNeed = { id: nextNeedId(), farmerId, kategori: kategori as NeedKategori, item, jumlah, status: "BARU", catatan, createdAt: now, updatedAt: now };
+    needsDb.unshift(rec);
+    saveNeedsToDisk();
+    bumpDataVersion();
+    res.json(rec);
+  });
+  app.patch("/api/farmer-needs/:id", requireSession(), (req, res) => {
+    const gate = requireRequesterAdmin(req.body);
+    if (!gate.ok) {
+      return res.status(403).json({ error: gate.error });
+    }
+    const id = String(req.params.id || "").toUpperCase();
+    const n = needsDb.find((x) => x.id.toUpperCase() === id);
+    if (!n) {
+      return res.status(404).json({ error: "Kebutuhan tidak ditemukan." });
+    }
+    if (req.body?.status !== undefined) {
+      const st = String(req.body.status || "").toUpperCase();
+      if (!NEED_ST.includes(st)) {
+        return res.status(400).json({ error: "status tidak dikenal." });
+      }
+      n.status = st as NeedStatus;
+    }
+    if (req.body?.supplierId !== undefined) {
+      const sid = String(req.body.supplierId || "").trim();
+      if (sid && !suppliersDb.some((s) => s.id === sid)) {
+        return res.status(400).json({ error: "supplierId tidak dikenal." });
+      }
+      n.supplierId = sid || undefined;
+      if (sid && n.status === "BARU") n.status = "DIHUBUNGKAN";
+    }
+    if (req.body?.item !== undefined) {
+      const item = String(req.body.item || "").trim().slice(0, 80);
+      if (!item) {
+        return res.status(400).json({ error: "item tidak boleh kosong." });
+      }
+      n.item = item;
+    }
+    if (req.body?.jumlah !== undefined) n.jumlah = String(req.body.jumlah || "").trim().slice(0, 30) || undefined;
+    if (req.body?.catatan !== undefined) n.catatan = String(req.body.catatan || "").trim().slice(0, 300) || undefined;
+    n.updatedAt = new Date().toISOString();
+    saveNeedsToDisk();
+    bumpDataVersion();
+    res.json(n);
+  });
+  app.delete("/api/farmer-needs/:id", requireSession(), (req, res) => {
+    const gate = requireRequesterAdmin(req.body);
+    if (!gate.ok) {
+      return res.status(403).json({ error: gate.error });
+    }
+    const id = String(req.params.id || "").toUpperCase();
+    const ix = needsDb.findIndex((r) => r.id.toUpperCase() === id);
+    if (ix < 0) {
+      return res.status(404).json({ error: "Kebutuhan tidak ditemukan." });
+    }
+    const [gone] = needsDb.splice(ix, 1);
+    saveNeedsToDisk();
     bumpDataVersion();
     res.json({ deleted: gone.id });
   });
