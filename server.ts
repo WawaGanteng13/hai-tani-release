@@ -1224,6 +1224,93 @@ function waOutboundConfig(): { token: string; phoneId: string } {
     phoneId: (process.env.PHONE_NUMBER_ID || WA_DEFAULT_PHONE_ID).trim(),
   };
 }
+// ---- Router multi-nomor WA (hemat jatah gratis 1.000 pesan/nomor/bulan) ----
+// WA_NUMBERS_JSON = [{"id":"<phone_number_id>","label":"CS-1"}, ...].
+// Tanpa env: 1 nomor (PHONE_NUMBER_ID) = perilaku lama. Sticky per user agar
+// konteks tidak pindah nomor; chat baru ke nomor yang jatahnya tersisa.
+const WA_FREE_QUOTA = 1000;
+const WAQUOTA_FILE = path.join(DATA_DIR, "waquota_db.json");
+interface WaQuotaStore { usage: Record<string, Record<string, number>>; sticky: Record<string, string> }
+let waQuotaCache: WaQuotaStore | null = null;
+function waQuota(): WaQuotaStore {
+  if (!waQuotaCache) {
+    const d = readJsonSafe<unknown>(WAQUOTA_FILE, null, "waquota_db.json");
+    waQuotaCache = (d && typeof d === "object" ? d : { usage: {}, sticky: {} }) as WaQuotaStore;
+    if (!waQuotaCache.usage) waQuotaCache.usage = {};
+    if (!waQuotaCache.sticky) waQuotaCache.sticky = {};
+  }
+  return waQuotaCache;
+}
+function waQuotaSave(): void {
+  const q = waQuotaCache;
+  if (!q) return;
+  const months = Object.keys(q.usage).sort();
+  while (months.length > 3) delete q.usage[months.shift() as string];
+  writeJsonAtomic(WAQUOTA_FILE, q, "waquota_db.json");
+}
+function waMonth(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+interface WaNumber { id: string; label: string }
+let waNumbersCache: WaNumber[] | null = null;
+function waNumbers(): WaNumber[] {
+  if (!waNumbersCache) {
+    try {
+      const raw = JSON.parse(process.env.WA_NUMBERS_JSON || "[]");
+      const list = (Array.isArray(raw) ? raw : []).filter((x: any) => x && String(x.id || "").trim());
+      if (list.length > 0) {
+        waNumbersCache = list.map((x: any, i: number) => ({ id: String(x.id).trim(), label: String(x.label || `WA-${i + 1}`).trim() }));
+      }
+    } catch { /* abaikan, fallback di bawah */ }
+    if (!waNumbersCache) {
+      const { phoneId } = waOutboundConfig();
+      waNumbersCache = phoneId ? [{ id: phoneId, label: "Utama" }] : [];
+    }
+  }
+  return waNumbersCache;
+}
+function waUsage(phoneId: string): number {
+  return waQuota().usage[waMonth()]?.[phoneId] || 0;
+}
+function waNoteInbound(userPhone: string, receivingPhoneId: string): void {
+  const ids = waNumbers().map((n) => n.id);
+  if (!ids.includes(receivingPhoneId)) return;
+  const key = normalizePhone(userPhone);
+  if (!key) return;
+  const q = waQuota();
+  if (q.sticky[key] !== receivingPhoneId) {
+    q.sticky[key] = receivingPhoneId;
+    waQuotaSave();
+  }
+}
+function waPickNumber(userPhone?: string): string {
+  const nums = waNumbers();
+  if (nums.length === 0) return "";
+  const ids = nums.map((n) => n.id);
+  if (userPhone) {
+    const stick = waQuota().sticky[normalizePhone(userPhone)];
+    if (stick && ids.includes(stick)) return stick;
+  }
+  const withFree = nums.filter((n) => waUsage(n.id) < WA_FREE_QUOTA);
+  const pool = withFree.length > 0 ? withFree : nums;
+  let best = pool[0];
+  for (const n of pool) {
+    if (waUsage(n.id) < waUsage(best.id)) best = n;
+  }
+  if (userPhone && normalizePhone(userPhone)) {
+    waQuota().sticky[normalizePhone(userPhone)] = best.id;
+    waQuotaSave();
+  }
+  return best.id;
+}
+function waCountSend(phoneId: string): void {
+  const q = waQuota();
+  const m = waMonth();
+  q.usage[m] = q.usage[m] || {};
+  q.usage[m][phoneId] = (q.usage[m][phoneId] || 0) + 1;
+  waQuotaSave();
+}
 // 08xx/+62 campur → 62xxxxxxxxxx (format `to` Meta).
 function toWaNumber(phone?: string): string {
   let p = String(phone || "").replace(/[^0-9]/g, "");
@@ -1233,7 +1320,18 @@ function toWaNumber(phone?: string): string {
 }
 type WaSendResult = { to: string; ok: boolean; messageId?: string; errorCode?: number; error?: string };
 async function waPostGraph(path: string, payload: Record<string, unknown>, timeoutMs = 8000): Promise<{ ok: boolean; json: any; status: number }> {
-  const { token, phoneId } = waOutboundConfig();
+  const { token } = waOutboundConfig();
+  const __via = String((payload as any)?.__via || "");
+  const __to = String((payload as any)?.to || "");
+  const __ids = waNumbers().map((n) => n.id);
+  let phoneId: string;
+  if (__via && __ids.includes(__via)) {
+    phoneId = __via;
+    if (__to) waNoteInbound(__to, __via);
+  } else {
+    phoneId = waPickNumber(__to || undefined);
+    if (!phoneId) phoneId = waOutboundConfig().phoneId || "";
+  }
   if (!token || !phoneId) return { ok: false, json: null, status: 0 };
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
@@ -1241,10 +1339,11 @@ async function waPostGraph(path: string, payload: Record<string, unknown>, timeo
     const r = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneId}${path}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ messaging_product: "whatsapp", ...payload }),
+      body: JSON.stringify(({ messaging_product: "whatsapp", ...payload, __via: undefined })),
       signal: ctl.signal,
     });
     const json: any = await r.json().catch(() => null);
+    if (r.ok) waCountSend(phoneId);
     return { ok: r.ok, json, status: r.status };
   } finally {
     clearTimeout(t);
@@ -1981,7 +2080,7 @@ function evalOffer(o: Offer): { cocokKg: number; overLines: OfferLine[]; waiting
   const need = Number(o.qtyKg) || 0;
   const budget = Number(o.budgetPerKg) || 0;
   const priced = o.lines
-    .filter((l) => Number(l.hargaPetaniPerKg) > 0)
+    .filter((l) => Number(l.hargaPetaniPerKg) > 0 && l.spekOk !== false)
     .sort((a, b) => Number(a.hargaPetaniPerKg) - Number(b.hargaPetaniPerKg));
   const waitingPrice = o.lines.filter((l) => !Number(l.hargaPetaniPerKg)).length;
   for (const l of o.lines) { l.alokasiKg = 0; l.cocok = false; }
@@ -2023,7 +2122,8 @@ function offerStatusText(o: Offer, viewer: "buyer" | "farmer"): string {
   const budgetTxt = Number(o.budgetPerKg) > 0 ? fmtRp(Number(o.budgetPerKg)) + "/kg" : "belum diisi";
   const head = `🤝 *Penawaran ${o.id}* — *${o.status}*\n` +
     `• Komoditas: *${o.komoditas}* — butuh ${fmtKg(Number(o.qtyKg))}\n` +
-    `• Budget buyer: ${budgetTxt}\n`;
+    `• Budget buyer: ${budgetTxt}\n` +
+    (o.spesifikasi ? `• Spek: ${o.spesifikasi}\n` : "");
   const lines = o.lines.length === 0
     ? "• Petani: (belum ada yang lapor stok)"
     : "• Petani:\n" + o.lines.map((l) => {
@@ -4708,6 +4808,23 @@ export function createServerApp() {
     });
   });
 
+  // GET pemakaian jatah gratis WA per nomor (router multi-nomor, admin saja)
+  app.get("/api/wa/quota", requireSession(), async (_req, res) => {
+    const month = waMonth();
+    res.json({
+      ok: true,
+      month,
+      freeQuota: WA_FREE_QUOTA,
+      numbers: waNumbers().map((n) => ({
+        id: n.id,
+        label: n.label,
+        sent: waUsage(n.id),
+        remaining: Math.max(0, WA_FREE_QUOTA - waUsage(n.id)),
+      })),
+      stickyUsers: Object.keys(waQuota().sticky).length,
+    });
+  });
+
   // GET 9Router Gateway status & model discovery
   app.get("/api/9router/status", requireSession(), async (_req, res) => {
     const cfg = getNineRouterConfig();
@@ -6215,8 +6332,13 @@ export function createServerApp() {
     if (!o) {
       return res.status(404).json({ error: "Penawaran tidak ditemukan." });
     }
-    // Status/lines milik mesin negosiasi chat; admin hanya boleh mencatat.
+    // Status/lines milik mesin negosiasi chat; admin hanya boleh mencatat + spek.
     if (req.body?.namaBuyer !== undefined) o.namaBuyer = String(req.body.namaBuyer || "").trim().slice(0, 60) || undefined;
+    if (req.body?.spesifikasi !== undefined) {
+      o.spesifikasi = String(req.body.spesifikasi || "").trim().slice(0, 120) || undefined;
+      for (const l of o.lines) l.spekOk = undefined;
+      evalOffer(o);
+    }
     if (req.body?.catatan !== undefined) o.catatan = String(req.body.catatan || "").trim().slice(0, 300) || undefined;
     if (req.body?.followupAt !== undefined) {
       o.followupAt = req.body.followupAt === "now" ? new Date().toISOString() : undefined;
@@ -7380,7 +7502,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         reply, quickReplies: qr, extracted: {}, isComplete: true,
         isAdminAction: !!isAdmin, aiProvider: "rule_based",
       } as any);
-      const setAsk = (u: UserRecord, kind: "HARGA_JUAL" | "BUDGET" | "KONFIRM_DEAL", offerId: string) => {
+      const setAsk = (u: UserRecord, kind: "HARGA_JUAL" | "BUDGET" | "KONFIRM_DEAL" | "SPEK_OK", offerId: string) => {
         u.pendingAsk = { kind, offerId, ts: new Date().toISOString() };
         touchUser(u);
       };
@@ -7463,7 +7585,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         });
         return composeBuyerFit(o, ev);
       };
-      const doFarmerPrice = (o: Offer, price: number): string => {
+      const doFarmerPrice = (o: Offer, price: number, spek?: boolean): string => {
         let line = o.lines.find((l) => l.farmerId === meFarmer!.id);
         if (!line) {
           const cand = findStockCandidates(o.komoditas).find((k) => k.farmerId === meFarmer!.id);
@@ -7473,6 +7595,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         }
         line.hargaPetaniPerKg = price;
         line.hargaAt = new Date().toISOString();
+        if (spek !== undefined) line.spekOk = spek;
         const krow = komoditasDb.find((x) => x.id === line!.komoditasId);
         if (krow) {
           krow.hargaMintaPerKg = price;
@@ -7598,8 +7721,9 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       const EXPLICIT_RE = /cek penawaran|status penawaran|info penawaran|penawaran saya|^\s*batal\s+OFR|^\s*OFR-\d+\s*$|komoditas saya|^\s*bantuan\s*$/i;
       const STOCKCMD_RE = /\b(stok|ready|siap|tersedia)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
       const DEMANDCMD_RE = /\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
+      const SPEKCMD_RE = /^\s*spek\b/i;
       const msgStr = String(message || "");
-      if (pa && (pa.kind === "HARGA_JUAL" || pa.kind === "BUDGET" || pa.kind === "KONFIRM_DEAL") && !EXPLICIT_RE.test(msgStr) && !STOCKCMD_RE.test(msgStr) && !DEMANDCMD_RE.test(msgStr)) {
+      if (pa && (pa.kind === "HARGA_JUAL" || pa.kind === "BUDGET" || pa.kind === "KONFIRM_DEAL" || pa.kind === "SPEK_OK") && !EXPLICIT_RE.test(msgStr) && !STOCKCMD_RE.test(msgStr) && !DEMANDCMD_RE.test(msgStr) && !SPEKCMD_RE.test(msgStr)) {
         const o = offersDb.find((x) => x.id === pa.offerId && x.status !== "DEAL" && x.status !== "BATAL");
         if (!o) {
           clearAsk();
@@ -7620,6 +7744,30 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           }
         } else {
           const price = parseRpPerKg(String(message || ""));
+          if (pa.kind === "SPEK_OK") {
+            if (!meFarmer) { clearAsk(); return nogoReply(`ⓘ Nomor ini tidak terdaftar sebagai petani.`); }
+            const t = lowerN;
+            const sline = o.lines.find((l) => l.farmerId === meFarmer!.id);
+            const wrapSpek = (ok: boolean, txt: string) => {
+              if (sline) sline.spekOk = ok;
+              evalOffer(o);
+              saveOffersToDisk();
+              clearAsk();
+              emitCanonicalEvent({
+                source: "wa-chat", entity: "offer", entityId: o.id,
+                action: "spek", actor: mePhone,
+                payload: { farmerId: meFarmer!.id, spekOk: ok, status: o.status },
+              });
+              return nogoReply(txt);
+            };
+            if (/tidak|nggak|gak\b|tidak bisa|belum bisa/.test(t)) {
+              return wrapSpek(false, `📝 Dicatat: stok Anda *tidak* memenuhi spek "${o.spesifikasi}" untuk *${o.id}*. Baris Anda dikeluarkan dari alokasi — penawaran lanjut dengan petani lain.`);
+            }
+            if (/sanggup|bisa|iya|\bya\b|^ok\b|siap/.test(t)) {
+              return wrapSpek(true, `✅ Siap! Spek "${o.spesifikasi}" *sanggup* dipenuhi untuk *${o.id}*. ${Number(o.budgetPerKg) ? `Status: ${o.status}.` : "Menunggu budget buyer."} Ketik "cek penawaran" untuk update.`);
+            }
+            return nogoReply(`ⓘ Balas *"sanggup"* bila spek "${o.spesifikasi}" bisa dipenuhi, atau *"tidak"*.`);
+          }
           if (price === undefined) {
             return nogoReply(pa.kind === "HARGA_JUAL"
               ? `ⓘ Balas angka harga saja, mis. "8000" atau "8,5rb per kg".`
@@ -7628,7 +7776,24 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           clearAsk();
           if (pa.kind === "HARGA_JUAL") {
             if (!meFarmer) return nogoReply(`ⓘ Nomor ini tidak terdaftar sebagai petani.`);
-            return nogoReply(doFarmerPrice(o, price));
+            const ht = lowerN;
+            let spek: boolean | undefined;
+            if (o.spesifikasi) {
+              if (/tidak|nggak|gak\b|tidak bisa/.test(ht)) spek = false;
+              else if (/sanggup|bisa penuhi|^bisa\b|iya|\bya\b/.test(ht)) spek = true;
+            }
+            const resp = doFarmerPrice(o, price, spek);
+            if (o.spesifikasi && spek === true) {
+              return nogoReply(resp + `\n✅ Spek "${o.spesifikasi}" tercatat sanggup.`);
+            }
+            if (o.spesifikasi && spek === false) {
+              return nogoReply(resp + `\n📝 Spek "${o.spesifikasi}" tercatat tidak dipenuhi — baris Anda keluar dari alokasi.`);
+            }
+            if (o.spesifikasi && spek === undefined && negoUser) {
+              setAsk(negoUser, "SPEK_OK", o.id);
+              return nogoReply(resp + `\n\n❓ Spek buyer: "${o.spesifikasi}". Balas *"sanggup"* atau *"tidak"*.`);
+            }
+            return nogoReply(resp);
           }
           return nogoReply(doBudget(o, price));
         }
@@ -7670,12 +7835,46 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         return nogoReply(`✅ ${o.id} dibatalkan.`);
       }
 
+      // (2b) Spek buyer ("spek OFR-003: ukuran besar" / "spek: ..."). "-" menghapus.
+      const mSpek = String(message || "").match(/^\s*spek(?:ifikasi)?\s*(?:(OFR-\d+)\s*:|:)?\s*(.+?)\s*$/i);
+      if (mSpek && !/^\s*spek(?:ifikasi)?\s*$/i.test(String(message || ""))) {
+        const spekTxt = String(mSpek[2] || "").replace(/[\r\n"“”]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+        let oS: Offer | undefined;
+        if (mSpek[1]) oS = offersDb.find((x) => x.id.toUpperCase() === mSpek[1].toUpperCase());
+        if (!oS) oS = myOpenOffer(true);
+        if (!oS) return nogoReply(`ⓘ Tidak ada penawaran terbuka milik Anda. Buat dulu via "butuh <komoditas> <qty>".`);
+        if (/^OFR-\d+$/i.test(spekTxt)) return nogoReply(`ⓘ Format: "spek ${oS.id}: <ukuran, potongan, kemasan>" atau "spek: <teks>". "-" menghapus.`);
+        if (normalizePhone(oS.buyerPhone) !== mePhone && !isAdmin) return nogoReply(`ⓘ Hanya buyer ${oS.id} atau admin yang bisa ubah spek.`);
+        if (oS.status === "DEAL" || oS.status === "BATAL") return nogoReply(`ⓘ ${oS.id} sudah ${oS.status} — spek tak bisa diubah.`);
+        if (!spekTxt || spekTxt === "-") {
+          oS.spesifikasi = undefined;
+          for (const l of oS.lines) l.spekOk = undefined;
+          evalOffer(oS);
+          saveOffersToDisk();
+          return nogoReply(`✅ Spek *${oS.id}* dihapus — semua baris kembali dinilai normal.`);
+        }
+        oS.spesifikasi = spekTxt;
+        for (const l of oS.lines) l.spekOk = undefined;
+        evalOffer(oS);
+        saveOffersToDisk();
+        emitCanonicalEvent({
+          source: "wa-chat", entity: "offer", entityId: oS.id,
+          action: "spek", actor: mePhone,
+          payload: { spesifikasi: spekTxt, status: oS.status },
+        });
+        return nogoReply(`✅ Spek *${oS.id}* dicatat: "${spekTxt}".\nPetani diminta verifikasi sanggup/tidak saat pasang harga.`);
+      }
+
       // (3) Demand buyer baru ("butuh kentang 2 ton"). Saprodi lolos ke ERP.
       const SAPRODI_RE = /urea|npk|pupuk|pestisida|herbisida|fungisida|insektisida|\bobat\b|benih|bibit|alsintan|traktor/;
       const mNeed = lowerN.match(/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b\s+(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:ton|kuintal|kwintal|kilogram|kg|kilo))\b/i);
       if (mNeed) {
         const kom = String(mNeed[2] || "").replace(/\b(di|ke|dari|untuk|dong|ya|nih)\b/gi, " ").replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
         const qty = parseQtyKg(mNeed[3] || "");
+        const mSpekInline = String(message || "").match(/(?:spek|spesifikasi)\s*:\s*(.+?)\s*$/i);
+        const spekBaru = mSpekInline
+          ? String(mSpekInline[1] || "").replace(/[\r\n"“”]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120)
+          : "";
         if (kom.length >= 3 && qty !== undefined && !SAPRODI_RE.test(kom)) {
           const now = new Date().toISOString();
           const cands = findStockCandidates(kom);
@@ -7683,6 +7882,10 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             && normalizePhone(x.buyerPhone) === mePhone && komMatch(x.komoditas, kom));
           if (reuse) {
             reuse.qtyKg = qty;
+            if (spekBaru) {
+              reuse.spesifikasi = spekBaru;
+              for (const l of reuse.lines) l.spekOk = undefined;
+            }
             for (const k of cands.slice(0, 10)) {
               const ln = reuse.lines.find((l) => l.farmerId === k.farmerId);
               if (ln) { ln.stokKg = Math.round(Number(k.stokSiapJualTon) * 1000); ln.komoditasId = k.id; }
@@ -7692,6 +7895,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             saveOffersToDisk();
             if (!Number(reuse.budgetPerKg) && negoUser) setAsk(negoUser, "BUDGET", reuse.id);
             return nogoReply(`🤝 *${reuse.id} diperbarui:* butuh *${kom}* ${fmtKg(qty)}.\n\n${stockListText(cands, kom, qty)}\n\n` +
+              (spekBaru ? `Spek: ${spekBaru}.\n\n` : "") +
               (Number(reuse.budgetPerKg) ? composeBuyerFit(reuse, ev) : `💰 *Budget Anda berapa per kg?* Balas mis. "budget 8000".`),
               ["Cek Penawaran"]);
           }
@@ -7700,6 +7904,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             buyerPhone: mePhone,
             komoditas: kom,
             qtyKg: qty,
+            spesifikasi: spekBaru || undefined,
             status: "OPEN",
             lines: [],
             createdAt: now,
@@ -7713,11 +7918,11 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           emitCanonicalEvent({
             source: "wa-chat", entity: "offer", entityId: o.id,
             action: "create", actor: mePhone,
-            payload: { komoditas: kom, qtyKg: qty, kandidat: o.lines.length },
+            payload: { komoditas: kom, qtyKg: qty, kandidat: o.lines.length, ...(spekBaru ? { spesifikasi: spekBaru } : {}) },
           });
           if (negoUser) setAsk(negoUser, "BUDGET", o.id);
           return nogoReply(
-            `🤝 *Permintaan dicatat: ${o.id}*\nButuh *${kom}* ${fmtKg(qty)}.\n\n${stockListText(cands, kom, qty)}\n\n💰 *Budget Anda berapa per kg?* Balas mis. "budget 8000".`,
+            `🤝 *Permintaan dicatat: ${o.id}*\nButuh *${kom}* ${fmtKg(qty)}.${spekBaru ? `\nSpek: ${spekBaru}.` : ""}\n\n${stockListText(cands, kom, qty)}\n\n💰 *Budget Anda berapa per kg?* Balas mis. "budget 8000".`,
             ["Cek Penawaran"]);
         }
       }
@@ -7785,7 +7990,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
               replyT += `\n\nAda buyer butuh ${fmtKg(Number(o0.qtyKg))} (${o0.id}).` +
                 (inlinePrice !== undefined
                   ? ` Harga ${fmtRp(inlinePrice)}/kg tercatat — ${Number(o0.budgetPerKg) ? `status penawaran: ${o0.status}.` : "menunggu budget buyer."}`
-                  : ` *Mau jual harga berapa per kg?*`);
+                  : ` *Mau jual harga berapa per kg?*` + (o0.spesifikasi ? `\nSpek buyer: "${o0.spesifikasi}". Tambahkan "sanggup" bila bisa penuhi (cth. "8000 sanggup"), atau balas "tidak".` : ""));
             } else {
               replyT += `\n\nBelum ada buyer yang butuh — stok ini otomatis terlihat saat ada permintaan.`;
             }
@@ -7800,7 +8005,20 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         const price = parseRpPerKg(String(message || ""));
         if (price !== undefined) {
           const o = myOpenOffer(false);
-          if (o) return nogoReply(doFarmerPrice(o, price));
+          if (o) {
+            const t5 = lowerN;
+            let spek5: boolean | undefined;
+            if (o.spesifikasi) {
+              if (/tidak|nggak|gak\b|tidak bisa/.test(t5)) spek5 = false;
+              else if (/sanggup|bisa penuhi|^bisa\b|iya|\bya\b/.test(t5)) spek5 = true;
+            }
+            const resp5 = doFarmerPrice(o, price, spek5);
+            if (o.spesifikasi && spek5 === undefined && negoUser) {
+              setAsk(negoUser, "SPEK_OK", o.id);
+              return nogoReply(resp5 + `\n\n❓ Spek buyer: "${o.spesifikasi}". Balas *"sanggup"* atau *"tidak"*.`);
+            }
+            return nogoReply(resp5);
+          }
         }
       }
 
@@ -9320,6 +9538,11 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       const msg = entry?.messages?.[0];
       const text = msg?.text?.body || msg?.button?.text || "";
       const from = msg?.from || "";
+      // Router multi-nomor: ingat nomor WA mana yang menerima chat ini (sticky per user).
+      try {
+        const recvId: string = String(entry?.metadata?.phone_number_id || "");
+        if (from && recvId) waNoteInbound(String(from), recvId);
+      } catch { /* sticky best-effort */ }
       // ShareLoc Meta: msg.type === "location" -> msg.location.{latitude,longitude,name,address}.
       const waLoc = msg?.type === "location" && msg?.location ? msg.location : null;
       const waLocValid = !!(waLoc && isValidWaCoords(waLoc.latitude, waLoc.longitude));

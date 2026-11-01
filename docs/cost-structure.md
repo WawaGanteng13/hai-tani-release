@@ -37,3 +37,19 @@ Assumptions: active farmer = 30 bot-messages/month; infra steps with load; staff
 - Biggest uncertainty: messages/farmer/month (30 assumed) and off-platform leakage (see revenue doc haircut).
 - Break-even sits below 1k active farmers even with staff - provided commission collection works (escrow).
 - Re-check Meta's rate card quarterly; utility-in-service-window rules changed Oct 2026 already.
+
+## Multi-number free-quota router (implemented 1 Nov 2026)
+
+Each WA business number gets 1,000 free service messages/month. `server.ts` now
+pools numbers: new chats route to the number with remaining quota, while each
+user sticks to the number they first contacted (context preserved in
+`usersDb`/`offersDb`, keyed by user phone - never by number).
+
+- Config: `WA_NUMBERS_JSON='[{"id":"<phone_number_id>","label":"CS-1"},...]'`
+  (all numbers under one WABA share one `WHATSAPP_ACCESS_TOKEN`). Unset = legacy
+  single-number behavior via `PHONE_NUMBER_ID`.
+- State: `data/waquota_db.json` (`usage` per number per month, `sticky`
+  user->number map; last 3 months retained).
+- Monitor: `GET /api/wa/quota` (admin session) shows sent/remaining per number.
+- Each extra number adds ~1,000 free messages/month (~Rp357rb value at utility
+  rates); 3 numbers cover ~100 farmers at 30 msgs/month entirely free.
