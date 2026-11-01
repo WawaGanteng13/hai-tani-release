@@ -80,6 +80,7 @@ const PermintaanBuyer: React.FC<{
   const [openId, setOpenId] = useState<string | null>(null);
   const [nama, setNama] = useState('');
   const [catatan, setCatatan] = useState('');
+  const [spek, setSpek] = useState('');
   const [saving, setSaving] = useState(false);
 
   const load = async () => {
@@ -101,6 +102,7 @@ const PermintaanBuyer: React.FC<{
     setOpenId(o.id);
     setNama(o.namaBuyer || '');
     setCatatan(o.catatan || '');
+    setSpek(o.spesifikasi || '');
   };
 
   const save = async (o: Offer, followup: boolean) => {
@@ -109,7 +111,7 @@ const PermintaanBuyer: React.FC<{
       const res = await fetch(`/api/offers/${encodeURIComponent(o.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requesterNoHp, namaBuyer: nama, catatan, ...(followup ? { followupAt: 'now' } : {}) }),
+        body: JSON.stringify({ requesterNoHp, namaBuyer: nama, catatan, spesifikasi: spek, ...(followup ? { followupAt: 'now' } : {}) }),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
@@ -164,6 +166,7 @@ const PermintaanBuyer: React.FC<{
               <p className="text-[11px] text-slate-500 truncate">
                 {o.komoditas} · <span className="tabular-nums">{(o.qtyKg || 0).toLocaleString('id-ID')} kg</span>
                 {o.budgetPerKg ? <> · budget <span className="tabular-nums">{rupiah(o.budgetPerKg)}/kg</span></> : ' · budget belum diisi'}
+                {o.spesifikasi ? <> · spek: {o.spesifikasi}</> : null}
               </p>
             </div>
             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${OFR_BADGE[o.status]}`}>{o.status}</span>
@@ -185,6 +188,8 @@ const PermintaanBuyer: React.FC<{
                         {farmerName(l.farmerId)} — {(l.alokasiKg ?? l.stokKg ?? 0).toLocaleString('id-ID')} kg
                         {l.hargaPetaniPerKg ? ` @ ${rupiah(l.hargaPetaniPerKg)}/kg` : ' (harga belum masuk)'}
                         {l.cocok === false && <span className="text-rose-600"> · tidak cocok</span>}
+                        {l.spekOk === true && <span className="text-emerald-700"> · spek sanggup</span>}
+                        {l.spekOk === false && <span className="text-rose-600"> · spek tidak</span>}
                       </li>
                     ))}
                   </ul>
@@ -197,6 +202,13 @@ const PermintaanBuyer: React.FC<{
                   <input
                     id={`nb-${o.id}`} value={nama} onChange={(e) => setNama(e.target.value)} maxLength={60}
                     placeholder="Nama buyer / toko" className="w-full text-xs px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1" htmlFor={`sp-${o.id}`}>Spek buyer (kosongkan = tanpa spek)</label>
+                  <input
+                    id={`sp-${o.id}`} value={spek} onChange={(e) => setSpek(e.target.value)} maxLength={120}
+                    placeholder="cth. ukuran besar, potong 2cm" className="w-full text-xs px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-500"
                   />
                 </div>
                 <div>
@@ -221,7 +233,7 @@ const PermintaanBuyer: React.FC<{
                   <Check className="w-3.5 h-3.5" />
                   Tandai sudah followup
                 </button>
-                <span className="text-[10px] text-slate-500">Status negosiasi milik chat; admin hanya mencatat.</span>
+                <span className="text-[10px] text-slate-500">Status milik chat; ubah spek mereset verifikasi petani.</span>
               </div>
             </div>
           )}

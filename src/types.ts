@@ -152,7 +152,7 @@ export interface UserRecord {
   feedbackCount?: number;
   // F3: pertanyaan negosiasi yang menunggu jawaban user ini.
   // F6: kind 'NUDGE' = pertanyaan proaktif harga (nudge harian).
-  pendingAsk?: { kind: 'HARGA_JUAL' | 'BUDGET' | 'KONFIRM_DEAL' | 'NUDGE'; offerId: string; ts: string; nudge?: { komoditasId: string; field: 'harga' } };
+  pendingAsk?: { kind: 'HARGA_JUAL' | 'BUDGET' | 'KONFIRM_DEAL' | 'NUDGE' | 'SPEK_OK'; offerId: string; ts: string; nudge?: { komoditasId: string; field: 'harga' } };
   // F6 session-maximizer: 1x sodoran/hari + opt-out permanen.
   lastNudgeAt?: string;
   nudgeOptOut?: boolean;
@@ -195,12 +195,14 @@ export interface OfferLine {
   hargaAt?: string;
   alokasiKg?: number;
   cocok?: boolean;
+  spekOk?: boolean;
 }
 export interface Offer {
   id: string;
   buyerPhone: string;
   komoditas: string;
   qtyKg: number;
+  spesifikasi?: string;
   budgetPerKg?: number;
   budgetAt?: string;
   status: OfferStatus;
