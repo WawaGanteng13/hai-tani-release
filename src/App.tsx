@@ -225,8 +225,8 @@ function AdminApp() {
     showToast(`Data ${newRecord.nama} (${newRecord.komoditas}) berhasil dicatat & disinkronkan ke Google Sheets!`, 'success');
   };
 
-  // Nomor operator dashboard (admin aktif pertama) untuk jejak audit tulis.
-  const operatorNoHp = () => admins.find((a) => a.aktif)?.noHp ?? '';
+  // Nomor operator dashboard = sesi login (server menolak bila tak cocok dengan sessionAdmin).
+  const operatorNoHp = () => me?.noHp ?? admins.find((a) => a.aktif)?.noHp ?? '';
 
   // Handle manual farmer addition
   const handleAddFarmerManual = async (farmerData: Partial<FarmerRecord>) => {
@@ -567,7 +567,7 @@ function AdminApp() {
             suppliers={suppliers}
             onRefreshData={loadData}
             onAddFarmerClick={() => setIsAddFarmerModalOpen(true)}
-            operatorNoHp={admins.find((a) => a.aktif)?.noHp ?? ''}
+            operatorNoHp={me?.noHp ?? admins.find((a) => a.aktif)?.noHp ?? ''}
           />
         )}
         </div>

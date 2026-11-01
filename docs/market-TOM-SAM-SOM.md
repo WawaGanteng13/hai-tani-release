@@ -25,7 +25,7 @@
 ## 3. SOM — Serviceable Obtainable Market (3-5 years)
 
 - Focus: Java-Sumatra, horticulture, buyer matchmaking via WA.
-- Author's share assumption: 1-3% of SAM → Rp21-189M/year subscription revenue.
+- Author's share assumption: 1-3% of SAM → Rp21-189 miliar/year subscription revenue.
 - Matchmaking GMV side (assumed 2-5% take rate) not computed — Rupiah horticulture market value unverified.
 - Sanity benchmark: Sayurbox ~1M customers (Java+Bali), >10,000 partner farmers, $120M Series C, 40,000-farmer target; Semaai targets 40M farmers & rural MSMEs — https://startuprise.org/agritech-startups-of-indonesia-2024/
 - Subscription-only; the full freemium + commission engine is computed separately in [revenue-streams.md](revenue-streams.md).

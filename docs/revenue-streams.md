@@ -40,8 +40,14 @@ Buyer seat "Mitra" Rp150rb/bln (sourcing analytics, verified directory) - option
 - Subscriptions = 400 x Rp300rb + 100 x Rp900rb = Rp210jt/year.
 - Total ~ Rp7.46B/year. Commission dominates 35:1 - subscriptions are loyalty, commission is the engine.
 - Leakage haircut (cash deals off-platform, mitigated by escrow): -30% commission -> total ~Rp5.29B.
-- Linear scale: 1k farmers ~Rp746M; 100k ~Rp74.6B (diseconomies ignored).
+- Linear scale: 1k farmers ~Rp746jt; 100k ~Rp74.6B (diseconomies ignored).
 - Half conversion (2.5%): subs Rp105jt, commission Rp7.31B - total barely moves.
+
+### Downside: adverse selection (illustrative assumptions)
+
+- Assumption: the most active 10% of farmers, holding an assumed 50% of GMV, upgrade to Panen (0% commission), leaving the commission base to smaller, less active deals.
+- Commission falls to ~Rp3.6B while subscriptions rise to ~Rp900jt (1k Panen seats x Rp900rb/year); total ~Rp4.5B vs the ~Rp7.46B basis above (-40%).
+- Every figure in this subsection is an assumption for sensitivity analysis, not a measurement; mitigations under study: Mitra buyer seats, escrow stickiness, and Panen pricing above the avoided commission.
 
 ## Verification
 

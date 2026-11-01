@@ -135,6 +135,7 @@ async function fetchHargaPasar(): Promise<{ tanggal: string; daftar: PasarPrice[
     }
     if (daftar.length > 0) {
       pasarCache = { at: now, tanggal, daftar };
+      try { detectPriceAnomalies(daftar); } catch { /* detektor tak boleh ganggu chat */ }
       return { tanggal, daftar, live: true };
     }
   } catch (e) {
@@ -144,6 +145,68 @@ async function fetchHargaPasar(): Promise<{ tanggal: string; daftar: PasarPrice[
   return { tanggal, daftar: [], live: false };
 }
 
+// ---- Auto-EWS: deteksi anomali dari harga live SISKAPERBAPO ----
+// Berjalan tiap fetch live sukses (sync, murah: ~5 komoditas). Hanya mencatat
+// transisi status -> notifikasi "Pending" untuk admin; broadcast ke petani tetap
+// manual 1-tap (hemat biaya WA, anti-spam). Tak boleh throw ke pemanggil.
+function detectPriceAnomalies(daftar: PasarPrice[]): void {
+  try {
+    if (!Array.isArray(daftar) || daftar.length === 0) return;
+    const today = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" });
+    for (const item of commoditiesDb) {
+      const cn = String(item.nama || "").toLowerCase();
+      const alias = HARGA_ALIAS.find((a) => a.keys.some((k) => cn.includes(k)));
+      if (!alias) continue;
+      const row = daftar.find((d) => {
+        const dn = String(d.nama || "").toLowerCase();
+        return alias.keys.some((k) => dn.includes(k));
+      });
+      const live = Number(row?.harga);
+      const base = Number(item.hargaSekarang);
+      if (!(live > 0) || !(base > 0)) continue;
+      const pct = Number((((live - base) / base) * 100).toFixed(2));
+      const st: MarketCommodity["statusAnomali"] = pct >= 20 ? "LONJAKAN_EKSTREM"
+        : pct <= -20 ? "PENURUNAN_DRASTIS"
+        : Math.abs(pct) >= 10 ? "PERINGATAN_FLUKTUASI" : "NORMAL";
+      if (st === item.statusAnomali) continue;
+      item.hargaKemarin = base;
+      item.hargaSekarang = live;
+      item.perubahanPersen = pct;
+      item.statusAnomali = st;
+      item.tanggalUpdate = today;
+      item.pesanAnomali = st === "NORMAL" ? "Kondisi harga relatif stabil dalam rentang normal."
+        : st === "LONJAKAN_EKSTREM" ? `Lonjakan ekstrem (+${pct}%) terdeteksi otomatis dari SISKAPERBAPO.`
+        : st === "PENURUNAN_DRASTIS" ? `Penurunan drastis (${pct}%) terdeteksi otomatis dari SISKAPERBAPO.`
+        : `Perubahan signifikan (${pct}%) terdeteksi otomatis dari SISKAPERBAPO.`;
+      item.tren7Hari.push({ tanggal: new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "short" }), harga: live });
+      if (item.tren7Hari.length > 7) item.tren7Hari.shift();
+      if (st !== "NORMAL") {
+        const growers = farmersDb.filter((f) => String(f.komoditas || "").toLowerCase().split(/[;,]/).some((c) => {
+          const cc = c.trim();
+          return cc && (alias.keys.some((k) => cc.includes(k)) || cn.includes(cc));
+        }));
+        notificationsDb.unshift({
+          id: `NOTIF-${Date.now()}-${item.id}`,
+          komoditas: item.nama,
+          tipeAnomali: (st === "PERINGATAN_FLUKTUASI" ? "PERINGATAN_PASAR" : st) as AnomalyNotification["tipeAnomali"],
+          pesanPeringatan: item.pesanAnomali || "",
+          waktuKirim: new Date().toISOString(),
+          jumlahPetaniTerdampak: growers.length,
+          status: "Pending",
+          targetPetaniNames: growers.slice(0, 20).map((g) => g.nama),
+        });
+        emitCanonicalEvent({
+          source: "ews-auto", entity: "commodity", entityId: item.id,
+          action: "anomaly", actor: "sistem",
+          payload: { nama: item.nama, harga: live, pct, status: st },
+        });
+      }
+      bumpDataVersion();
+    }
+  } catch (err) {
+    console.error("[EWS] deteksi gagal:", (err as Error)?.message || err);
+  }
+}
 const HARGA_ALIAS: Array<{ keys: string[]; match: string[] }> = [
   { keys: ["rawit"], match: ["cabe rawit merah"] },
   { keys: ["keriting"], match: ["cabe merah keriting"] },
@@ -2037,16 +2100,20 @@ function parseQtyKg(s: string): number | undefined {
 }
 // "50000", "50.000", "50rb", "8,5rb", "Rp 8.500/kg" -> rupiah per kg.
 // Tolak di luar 100..2.000.000 agar qty ("10 kg") tak terbaca sebagai harga.
+// Klausa ke-4: kata komoditas boleh di antara keyword dan angka
+// ("jual agave 50000 per kg") — angka WAJIB diikuti penanda satuan harga
+// (rb/ribu/k//kg/per kg) agar qty ("jual 500 kg") tak salah baca.
 function parseRpPerKg(s: string): number | undefined {
   const t = String(s || "").toLowerCase();
   const clause = t.match(/(?:harga|budget|jual|tawar|minta|deal)\s*(?:rp\.?|rupiah)?\s*([\d.,]+)\s*(rb|ribu|k\b)?/)
     || t.match(/(?:rp\.?|rupiah)\s*([\d.,]+)\s*(rb|ribu|k\b)?/)
     || t.match(/([\d.,]+)\s*(rb|ribu)\b/)
+    || t.match(/\b(?:jual|tawar|minta|harga|budget|deal)\b[\s\S]{0,40}?([\d.,]+)\s*(rb|ribu|k\b|\/kg|per\s?kg)/)
     || t.match(/^\s*([\d.,]+)\s*(\/kg|per\s?kg|\bkg\b)?\s*$/);
   if (!clause) return undefined;
   let v = Number(clause[1].replace(/\./g, "").replace(/,/g, "."));
   if (!Number.isFinite(v) || v <= 0) return undefined;
-  if (clause[2] && /rb|ribu|k/.test(clause[2])) v = v * 1000;
+  if (clause[2] && /^(rb|ribu|k)$/.test(clause[2].trim())) v = v * 1000;
   if (v < 100 || v > 2000000) return undefined;
   return Math.round(v);
 }
@@ -2077,6 +2144,12 @@ function findStockCandidates(komoditas: string): FarmerCommodity[] {
 }
 // Alokasi termurah-dulu (maksimalkan selisih untuk kas) + status + spread.
 function evalOffer(o: Offer): { cocokKg: number; overLines: OfferLine[]; waitingPrice: number } {
+  // Status terminal tak pernah dievaluasi ulang (defense in depth): DEAL/BATAL final, kuitansi utuh.
+  if (o.status === "DEAL" || o.status === "BATAL") {
+    const cocokKg = o.lines.reduce((acc, l) => acc + (Number(l.alokasiKg) || 0), 0);
+    const waitingPrice = o.lines.filter((l) => !Number(l.hargaPetaniPerKg)).length;
+    return { cocokKg, overLines: [], waitingPrice };
+  }
   const need = Number(o.qtyKg) || 0;
   const budget = Number(o.budgetPerKg) || 0;
   const priced = o.lines
@@ -2091,7 +2164,17 @@ function evalOffer(o: Offer): { cocokKg: number; overLines: OfferLine[]; waiting
     for (const l of priced) {
       if (remaining <= 0) break;
       if (Number(l.hargaPetaniPerKg) > budget) { overLines.push(l); continue; }
-      const take = Math.min(Number(l.stokKg) || 0, remaining);
+      // Stok tersedia = snapshot baris dikurangi alokasi offer LAIN yang belum terminal (kunci: komoditasId).
+      // DEAL sudah dipotong dari stok live; BATAL diabaikan.
+      const dipakaiLain = l.komoditasId ? offersDb.reduce((acc, x) => {
+        if (x.id === o.id || (x.status !== "OPEN" && x.status !== "SEBAGIAN" && x.status !== "COCOK")) return acc;
+        for (const l2 of x.lines) {
+          if (l2.komoditasId === l.komoditasId) acc += Number(l2.alokasiKg) || 0;
+        }
+        return acc;
+      }, 0) : 0;
+      const tersedia = Math.max(0, (Number(l.stokKg) || 0) - dipakaiLain);
+      const take = Math.min(tersedia, remaining);
       l.alokasiKg = take;
       l.cocok = take > 0;
       cocokKg += take;
@@ -2142,9 +2225,46 @@ function offerStatusText(o: Offer, viewer: "buyer" | "farmer"): string {
   void viewer;
   return head + lines + tail;
 }
+// F9: komisi per tier (docs/revenue-streams.md: Tunas 5%, Tumbuh 2%, Panen 0%).
+// FREE = tarif Tunas; PAID lawas = tarif Tumbuh. Selisih negosiasi di atas
+// komisi tier dikembalikan ke petani via top-up harga (pro-petani).
+const TIER_COMMISSION_PCT: Record<string, number> = { FREE: 5, TUNAS: 5, TUMBUH: 2, PANEN: 0, PAID: 2 };
+function tierOfPhone(phone: string): string {
+  try {
+    const key = normalizePhone(phone) || String(phone || "");
+    const u = usersDb.find((x) => normalizePhone(x.phone) === key);
+    const t = String((u as any)?.tier || "FREE").toUpperCase();
+    return TIER_COMMISSION_PCT[t] !== undefined ? t : "FREE";
+  } catch {
+    return "FREE";
+  }
+}
 // DEAL: komisi (selisih) masuk kas + stok petani berkurang sesuai alokasi.
-function finalizeOfferDeal(o: Offer, actorPhone: string): { kasId: string | null; spread: number } {
-  const spread = Math.round(Number(o.spreadTotalRp) || 0);
+function finalizeOfferDeal(o: Offer, actorPhone: string): { kasId: string | null; spread: number; tierTxt: string } {
+  const budget = Number(o.budgetPerKg) || 0;
+  let spread = 0;
+  const tierBits: string[] = [];
+  for (const l of o.lines) {
+    const kg = Number(l.alokasiKg) || 0;
+    if (kg <= 0 || budget <= 0) continue;
+    const fPrice = Number(l.hargaPetaniPerKg) || 0;
+    const lineValue = Math.round(budget * kg);
+    const lineSpread = Math.round((budget - fPrice) * kg);
+    if (lineSpread <= 0) continue;
+    const fr = farmersDb.find((x) => x.id === l.farmerId);
+    const tier = tierOfPhone(fr?.noHp || "");
+    const pct = TIER_COMMISSION_PCT[tier] ?? 5;
+    const take = Math.min(lineSpread, Math.round(lineValue * pct / 100));
+    spread += take;
+    const back = lineSpread - take;
+    if (back > 0) {
+      l.hargaPetaniPerKg = Number((fPrice + back / kg).toFixed(2));
+    }
+    tierBits.push(`${l.farmerId}:${tier} ${pct}%`);
+  }
+  spread = Math.round(spread);
+  o.spreadTotalRp = spread;
+  const tierTxt = tierBits.length > 0 ? ` [${tierBits.join(", ")}]` : "";
   let kasId: string | null = null;
   if (spread > 0) {
     const now = new Date().toISOString();
@@ -2157,7 +2277,7 @@ function finalizeOfferDeal(o: Offer, actorPhone: string): { kasId: string | null
       jumlahRp: spread,
       komoditas: sanitizeText(o.komoditas, 60) || undefined,
       catatan: sanitizeText(
-        `Komisi ${o.id}: buyer ${maskPhone(o.buyerPhone)} <- ${o.lines.filter((l) => Number(l.alokasiKg) > 0).map((l) => l.farmerId).join(", ")}`, 500),
+        `Komisi ${o.id}${tierTxt}: buyer ${maskPhone(o.buyerPhone)} <- ${o.lines.filter((l) => Number(l.alokasiKg) > 0).map((l) => l.farmerId).join(", ")}`, 500),
       dicatatOleh: String(actorPhone || "sistem"),
       waktuCatat: now,
       googleSheetRow: nextSheetRow(cashDb.map((c) => c.googleSheetRow), cashDb.length),
@@ -2169,7 +2289,7 @@ function finalizeOfferDeal(o: Offer, actorPhone: string): { kasId: string | null
     emitCanonicalEvent({
       source: "wa-chat", entity: "cash", entityId: record.id,
       action: "create", actor: actorPhone,
-      payload: { jenis: "MASUK", kategori: "Komisi Negosiasi", jumlahRp: spread, offerId: o.id },
+      payload: { jenis: "MASUK", kategori: "Komisi Negosiasi", jumlahRp: spread, offerId: o.id, tier: tierTxt },
     });
   }
   for (const l of o.lines) {
@@ -2197,7 +2317,7 @@ function finalizeOfferDeal(o: Offer, actorPhone: string): { kasId: string | null
     action: "deal", actor: actorPhone,
     payload: { komoditas: o.komoditas, qtyKg: o.qtyKg, budgetPerKg: o.budgetPerKg, spreadTotalRp: spread, kasId },
   });
-  return { kasId, spread };
+  return { kasId, spread, tierTxt };
 }
 
 // ============ F6: session-maximizer (sodoran proaktif 1x/hari) ============
@@ -4988,15 +5108,26 @@ export function createServerApp() {
 
   // GET all recognized admin numbers
   app.get("/api/admins", requireSession(), (_req, res) => {
-    res.json(adminsDb);
+    res.json(adminsDb.map((a) => ({ id: a.id, nama: a.nama, noHp: a.noHp, instansi: a.instansi, role: a.role, izinAkses: a.izinAkses, aktif: a.aktif, waktuTerdaftar: a.waktuTerdaftar, didaftarkanOleh: a.didaftarkanOleh, appointedBy: a.appointedBy })));
   });
 
   // Syarat pendaftar/pencabut admin: harus admin aktif yang sudah terdaftar.
   // Menutup eskalasi hak akses (pendaftaran admin oleh sembarang pengirim).
   // Pengecualian bootstrap: bila belum ada admin aktif sama sekali.
-  function requireRequesterAdmin(body: any): { ok: boolean; error?: string } {
+  function requireRequesterAdmin(body: any, sessionAdmin?: AdminUser): { ok: boolean; error?: string } {
     const activeAdmins = adminsDb.filter((a) => a.aktif);
     if (activeAdmins.length === 0) return { ok: true };
+    // Sesi login otoritatif: requesterNoHp tak boleh meminjam identitas admin lain.
+    if (sessionAdmin) {
+      const claimed = normalizePhone(body?.requesterNoHp);
+      if (claimed && claimed !== normalizePhone(sessionAdmin.noHp)) {
+        return { ok: false, error: "requesterNoHp tidak cocok dengan sesi login." };
+      }
+      if (!sessionAdmin.aktif || !findAdmin(sessionAdmin.noHp)) {
+        return { ok: false, error: "Sesi login bukan admin aktif." };
+      }
+      return { ok: true };
+    }
     const req = findAdmin(body?.requesterNoHp);
     if (!req) {
       return { ok: false, error: "Hanya admin aktif terdaftar yang boleh menambah/mencabut admin. Sertakan requesterNoHp admin pengesah." };
@@ -5005,7 +5136,18 @@ export function createServerApp() {
   }
 
   // F1: tambah/cabut ADMIN hanya oleh SUPER_ADMIN (nomor Setiawan kanonis).
-  function requireSuperAdmin(body: any): { ok: boolean; error?: string } {
+  function requireSuperAdmin(body: any, sessionAdmin?: AdminUser): { ok: boolean; error?: string } {
+    // Sesi login otoritatif: peran dibaca dari sesi, bukan body.
+    if (sessionAdmin) {
+      const claimed = normalizePhone(body?.requesterNoHp);
+      if (claimed && claimed !== normalizePhone(sessionAdmin.noHp)) {
+        return { ok: false, error: "requesterNoHp tidak cocok dengan sesi login." };
+      }
+      if (!sessionAdmin.aktif || sessionAdmin.role !== "SUPER_ADMIN") {
+        return { ok: false, error: "Hanya SUPER_ADMIN yang boleh menambah/mencabut admin." };
+      }
+      return { ok: true };
+    }
     const req = findAdmin(body?.requesterNoHp);
     if (!req || !req.aktif || req.role !== "SUPER_ADMIN") {
       return { ok: false, error: "Hanya SUPER_ADMIN yang boleh menambah/mencabut admin." };
@@ -5045,7 +5187,7 @@ export function createServerApp() {
       if (!me || !me.aktif || (me.role !== "ADMIN_UTAMA" && me.role !== "SUPER_ADMIN")) {
         return res.status(403).json({ error: "Hanya Admin Utama bersesi boleh mereset password." });
       }
-    } else if (!requireRequesterAdmin(req.body).ok) {
+    } else if (!requireRequesterAdmin(req.body, (req as any).sessionAdmin).ok) {
       return res.status(403).json({ error: "Butuh pengesah admin (migrasi satu-kali)." });
     }
     const salt = crypto.randomBytes(8).toString("hex");
@@ -5087,7 +5229,7 @@ export function createServerApp() {
     if (!nama || !noHp) {
       return res.status(400).json({ error: "Nama dan nomor WhatsApp wajib diisi." });
     }
-    const gate = requireSuperAdmin(req.body);
+    const gate = requireSuperAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -5129,7 +5271,7 @@ export function createServerApp() {
     if (target && target.role === "SUPER_ADMIN") {
       return res.status(403).json({ error: "Akun SUPER_ADMIN tidak dapat dihapus via API." });
     }
-    const gate = requireSuperAdmin(req.body);
+    const gate = requireSuperAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -5205,7 +5347,7 @@ export function createServerApp() {
   app.put("/api/farmers/:id", requireSession(), (req, res) => {
     const { id } = req.params;
     const data = req.body;
-    const gate = requireRequesterAdmin(data);
+    const gate = requireRequesterAdmin(data, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -5242,7 +5384,7 @@ export function createServerApp() {
   // POST verify farmer status
   app.post("/api/farmers/:id/verify", requireSession(), (req, res) => {
     const { id } = req.params;
-    const gateV = requireRequesterAdmin(req.body);
+    const gateV = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gateV.ok) {
       return res.status(403).json({ error: gateV.error });
     }
@@ -5265,7 +5407,7 @@ export function createServerApp() {
   // DELETE farmer by ID
   app.delete("/api/farmers/:id", requireSession(), (req, res) => {
     const { id } = req.params;
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -5303,7 +5445,7 @@ export function createServerApp() {
   app.put("/api/suppliers/:id", requireSession(), (req, res) => {
     const { id } = req.params;
     const data = req.body;
-    const gate = requireRequesterAdmin(data);
+    const gate = requireRequesterAdmin(data, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -5341,7 +5483,7 @@ export function createServerApp() {
   // DELETE supplier by ID
   app.delete("/api/suppliers/:id", requireSession(), (req, res) => {
     const { id } = req.params;
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -6281,7 +6423,7 @@ export function createServerApp() {
     res.json(fruitPricesDb);
   });
   app.post("/api/fruit-prices", requireSession(), (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -6303,7 +6445,7 @@ export function createServerApp() {
     res.json(rec);
   });
   app.delete("/api/fruit-prices/:id", requireSession(), (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -6323,7 +6465,7 @@ export function createServerApp() {
     res.json(offersDb);
   });
   app.patch("/api/offers/:id", requireSession(), (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -6331,6 +6473,10 @@ export function createServerApp() {
     const o = offersDb.find((x) => x.id.toUpperCase() === id);
     if (!o) {
       return res.status(404).json({ error: "Penawaran tidak ditemukan." });
+    }
+    // Status terminal: field pemicu-eval (spesifikasi) tak boleh berubah pada DEAL/BATAL; catatan/followup murni tetap boleh.
+    if ((o.status === "DEAL" || o.status === "BATAL") && req.body?.spesifikasi !== undefined) {
+      return res.status(409).json({ error: `Penawaran ${o.id} sudah ${o.status} - spesifikasi tak bisa diubah.` });
     }
     // Status/lines milik mesin negosiasi chat; admin hanya boleh mencatat + spek.
     if (req.body?.namaBuyer !== undefined) o.namaBuyer = String(req.body.namaBuyer || "").trim().slice(0, 60) || undefined;
@@ -6354,7 +6500,7 @@ export function createServerApp() {
     res.json(needsDb);
   });
   app.post("/api/farmer-needs", requireSession(), (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -6377,7 +6523,7 @@ export function createServerApp() {
     res.json(rec);
   });
   app.patch("/api/farmer-needs/:id", requireSession(), (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -6416,7 +6562,7 @@ export function createServerApp() {
     res.json(n);
   });
   app.delete("/api/farmer-needs/:id", requireSession(), (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -6433,7 +6579,7 @@ export function createServerApp() {
 
   // POST simulate or update commodity price
   app.post("/api/commodities/update", requireSession(), (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -6480,9 +6626,33 @@ export function createServerApp() {
     res.json(item);
   });
 
+  // POST jalankan detektor EWS sekarang atas data cache (admin).
+  app.post("/api/notifications/scan", requireSession(), (req, res) => {
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
+    if (!gate.ok) {
+      return res.status(403).json({ error: gate.error });
+    }
+    const daftar = (pasarCache?.daftar || []) as PasarPrice[];
+    const before = notificationsDb.length;
+    try {
+      detectPriceAnomalies(daftar);
+    } catch (e: any) {
+      return res.status(502).json({ error: "Deteksi gagal", detail: String(e?.message || e) });
+    }
+    res.json({
+      ok: true,
+      scanned: daftar.length,
+      cacheAt: pasarCache ? new Date(pasarCache.at).toISOString() : null,
+      baru: notificationsDb.length - before,
+      anomali: commoditiesDb
+        .filter((c) => c.statusAnomali !== "NORMAL")
+        .map((c) => ({ nama: c.nama, status: c.statusAnomali, pct: c.perubahanPersen, harga: c.hargaSekarang, kemarin: c.hargaKemarin })),
+    });
+  });
+
   // POST broadcast anomaly notification to farmers
   app.post("/api/notifications/broadcast", requireSession(), async (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -7037,15 +7207,16 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     touchUser(user);
   }
   const BARE_CANCEL_RE = /^\s*batal(kan|in)?\s*(semuanya|semua|aja|saja|dulu|deh|dong)?\s*[!.\s]*$/i;
-  // F1b: moderasi super admin via chat ("blokir 08xx" / "izinkan 08xx").
+  // F1b: moderasi super admin via chat ("blokir 08xx" / "izinkan 08xx" / "tier 08xx tumbuh").
   // Return objek respons = ditangani; null = bukan perintah moderasi.
   function handleSuperAdminModeration(message: string, effPhone?: string): any {
     if (!isSuperAdminPhone(effPhone)) return null;
     const t = String(message || "").trim();
     const mBlock = t.match(/^(blokir|blockir)\s+(\+?[0-9][0-9\s\-.]{8,})$/i);
     const mAllow = t.match(/^(izinkan|buka blokir|unblock)\s+(\+?[0-9][0-9\s\-.]{8,})$/i);
-    if (!mBlock && !mAllow) return null;
-    const digits = (mBlock ? mBlock[2] : (mAllow as RegExpMatchArray)[2]).replace(/\D/g, "");
+    const mTier = t.match(/^tier\s+(\+?[0-9][0-9\s\-.]{8,})\s+(tunas|tumbuh|panen|free)\s*$/i);
+    if (!mBlock && !mAllow && !mTier) return null;
+    const digits = (mBlock ? mBlock[2] : mTier ? (mTier as RegExpMatchArray)[1] : (mAllow as RegExpMatchArray)[2]).replace(/\D/g, "");
     const norm = normalizePhone(digits);
     let u = usersDb.find((x) => normalizePhone(x.phone) === norm);
     if (mBlock) {
@@ -7057,6 +7228,14 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       u.blockNoticed = false;
       touchUser(u);
       return { reply: `🚫 Nomor ${digits} DIBLOKIR. Balas "izinkan ${digits}" untuk membuka.`, quickReplies: [], extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based" };
+    }
+    if (mTier) {
+      if (!u) return { reply: "Nomor tidak ditemukan di database user.", quickReplies: [], extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based" };
+      const nt = String((mTier as RegExpMatchArray)[2] || "FREE").toUpperCase();
+      (u as any).tier = nt;
+      (u as any).paidAt = nt === "FREE" || nt === "TUNAS" ? undefined : new Date().toISOString();
+      touchUser(u);
+      return { reply: `✅ Tier ${digits} -> *${nt}* (komisi ${TIER_COMMISSION_PCT[nt] ?? 5}%).`, quickReplies: [], extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based" };
     }
     if (!u) return { reply: "Nomor tidak ditemukan di database user.", quickReplies: [], extracted: {}, isComplete: true, isAdminAction: true, aiProvider: "rule_based" };
     u.status = "ACTIVE";
@@ -7613,9 +7792,27 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         return farmerFitText(o, meFarmer!);
       };
       const doDeal = (o: Offer): string => {
-        const { kasId, spread } = finalizeOfferDeal(o, mePhone);
+        // Validasi-ulang stok live sebelum DEAL: tolak dengan pesan jelas bila kurang (tanpa clamp diam-diam).
+        const pakaiPerKmd = new Map<string, number>();
+        for (const l of o.lines) {
+          const kg = Number(l.alokasiKg) || 0;
+          if (kg > 0 && l.komoditasId) pakaiPerKmd.set(l.komoditasId, (pakaiPerKmd.get(l.komoditasId) || 0) + kg);
+        }
+        const kurang: string[] = [];
+        for (const [kmdId, pakai] of pakaiPerKmd) {
+          const k = komoditasDb.find((x) => x.id === kmdId);
+          const liveKg = Math.round(Number(k?.stokSiapJualTon || 0) * 1000);
+          if (liveKg < pakai) {
+            const fn = farmersDb.find((x) => x.id === (k ? k.farmerId : ""));
+            kurang.push(`${fn ? fn.nama : kmdId}: butuh ${fmtKg(pakai)}, stok live tinggal ${fmtKg(liveKg)}`);
+          }
+        }
+        if (kurang.length > 0) {
+          return `*${o.id} belum bisa DEAL* - stok live berkurang sejak alokasi:\n${kurang.join("\n")}\n\nKetik "cek penawaran" untuk alokasi terbaru.`;
+        }
+        const { kasId, spread, tierTxt } = finalizeOfferDeal(o, mePhone);
         clearOfferAsks(o.id);
-        const kasTxt = kasId ? ` Komisi ${fmtRp(spread)} masuk kas Hai Tani (\`${kasId}\`).` : " Tanpa selisih komisi.";
+        const kasTxt = kasId ? ` Komisi ${fmtRp(spread)}${tierTxt} masuk kas Hai Tani (\`${kasId}\`).` : " Tanpa selisih komisi.";
         return `✅ *DEAL ${o.id}!* ${fmtKg(Number(o.qtyKg))} ${o.komoditas} — buyer ${fmtRp(Number(o.budgetPerKg))}/kg.${kasTxt}\n\n${offerStatusText(o, "buyer")}`;
       };
 
@@ -9645,7 +9842,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
   // Broadcast hama khusus (template + endpoint sendiri).
   app.post("/api/notifications/pest-broadcast", requireSession(), async (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
@@ -9792,7 +9989,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 
   // Paksa kirim antrean sekarang (Admin Utama bersesi).
   app.post("/api/sheets/sync-now", requireSession(), async (req, res) => {
-    const gate = requireRequesterAdmin(req.body);
+    const gate = requireRequesterAdmin(req.body, (req as any).sessionAdmin);
     if (!gate.ok) {
       return res.status(403).json({ error: gate.error });
     }
