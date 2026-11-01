@@ -1,154 +1,152 @@
 # Hai Tani (TaniAI)
 
-> Dari Petani, untuk Kesejahteraan Petani
+> Dari Petani, untuk Kesejahteraan Petani ("From Farmers, for Farmers' Welfare")
 
-![Petani memegang ponsel dan peti cabai di ladang](public/landing-hp.jpg)
-*Ilustrasi: petani memakai Hai Tani lewat ponsel di ladang (gambar ilustrasi Hai Tani).*
+![Farmer holding a phone and a crate of chilies in the field](public/landing-hp.jpg)
+*Illustration: a farmer using Hai Tani by phone in the field (Hai Tani illustration).*
 
-## Summary (English)
+## Overview
 
 Hai Tani (TaniAI) is a WhatsApp-first marketplace assistant that connects Indonesian smallholder farmers directly with buyers. It addresses low farm-gate prices caused by long distribution chains and weak market information. Farmers chat in Indonesian or by voice note to register harvests, check market prices, and negotiate with verified buyers. The platform includes an admin dashboard, price anomaly alerts, a spatial farmer-supplier map, spreadsheet sync, and registration cards with QR codes. It is built on the WhatsApp Cloud API via Meta for Developers with an Express + React stack.
 
-## Latar Masalah
+## Problem Background
 
-Petani Indonesia menanggung rantai distribusi panjang dan posisi tawar lemah:
+Indonesian farmers carry long distribution chains and weak bargaining power:
 
-- Skala petani: 29,34 juta usaha pertanian (2023) vs 31,70 juta (2013); ~40% petani berusia >55 tahun; petani milenial (19-39 tahun) hanya 21%. Sumber: Sensus Pertanian 2023 via Jurnal Sukowati (penulis BPS) — https://journal.sragenkab.go.id/index.php/sukowati/article/view/493
-- Ketergantungan tengkulak: 68% petani mengandalkan tengkulak sebagai saluran utama, 32% jual langsung; kendala utama keterbatasan akses informasi pasar, minim modal, kurang infrastruktur — https://journal.yrpipku.com/index.php/msej/article/view/7858
-- Pendapatan tipis: Nilai Tukar Petani turun 110,12 (2023) ke rata-rata 106,85 (2024); pendapatan bersih petani padi hanya Rp1,8 juta/hektare/musim; harga gabah panen raya ±Rp5.000/kg, lebih rendah bila ke tengkulak — https://jurnal.bapperida.grobogan.go.id/jbp/article/download/101/45
-- Rantai panjang: pola Petani → Tengkulak → Penggilingan → Pengepul → Pengecer → Konsumen; selisih harga gabah vs beras merugikan petani (sampel 70 petani, 8 tengkulak, 4 penggilingan, 7 grosir, 5 pengecer) — https://jurnal.uinsu.ac.id/index.php/tawassuth/article/view/14855
-- Temuan pembanding (level cuplikan, URL nyata): 81,43% petani padi menjual ke tengkulak — https://jurnal.erapublikasi.id/index.php/JPPM/article/download/897/609 ; harga gabah jatuh Rp8.300 → Rp6.800/kg — https://jurnal.almaidah.or.id/index.php/AMANAH/id/article/download/324/286/1033 ; harga gabah sering anjlok di bawah HPP saat panen raya — https://ejurnal.dpr.go.id/index.php/jurnalbudget/article/download/134/123
+- Farmer scale: 29.34 million farm businesses (2023) vs 31.70 million (2013); ~40% of farmers are over 55; millennial farmers (19-39) only 21%. Source: 2023 Agricultural Census via Jurnal Sukowati (BPS author) — https://journal.sragenkab.go.id/index.php/sukowati/article/view/493
+- Middleman dependence: 68% of farmers rely on middlemen as the main channel, 32% sell direct; main constraints are limited market-information access, minimal capital, poor infrastructure — https://journal.yrpipku.com/index.php/msej/article/view/7858
+- Thin income: Farmer Exchange Rate down from 110.12 (2023) to an average 106.85 (2024); rice farmers' net income only Rp1.8 million/hectare/season; harvest-season grain price ±Rp5,000/kg, lower via middlemen — https://jurnal.bapperida.grobogan.go.id/jbp/article/download/101/45
+- Long chain: Farmer → Middleman → Miller → Aggregator → Retailer → Consumer; the grain-vs-rice price gap harms farmers (sample: 70 farmers, 8 middlemen, 4 millers, 7 wholesalers, 5 retailers) — https://jurnal.uinsu.ac.id/index.php/tawassuth/article/view/14855
+- Supporting findings (snippet level, real URLs): 81.43% of rice farmers sell to middlemen — https://jurnal.erapublikasi.id/index.php/JPPM/article/download/897/609 ; grain price fell Rp8,300 → Rp6,800/kg — https://jurnal.almaidah.or.id/index.php/AMANAH/id/article/download/324/286/1033 ; grain price often drops below the floor price at peak harvest — https://ejurnal.dpr.go.id/index.php/jurnalbudget/article/download/134/123
 
-WhatsApp adalah kanal yang tepat:
+WhatsApp is the right channel:
 
-- Pengguna internet Indonesia 2024: 221.563.479 jiwa dari populasi 278.696.200 (penetrasi 79,5%, naik 1,4%); kontribusi rural 30,5% vs urban 69,5%; survei 8.720 responden 38 provinsi — https://apjii.or.id/berita/d/apjii-jumlah-pengguna-internet-indonesia-tembus-221-juta-orang
-- WhatsApp platform #1 Indonesia, dipakai ~90-90,8% pengguna internet per bulan — https://www.ungkit.com/2026/10/the-most-widely-used-social-media.html ; Indonesia 94,3 juta pengguna — negara top-3 global — https://searchengineland.com/guide/whatsapp-users
-- Audiens medsos Indonesia 180 juta (+26% YoY), 62,9% populasi; WhatsApp memimpin monthly usage — https://www.marketing-interactive.com/report-indonesia-s-social-media-audience-hits-180-million-driving-brand-discovery
-- Petani sudah memakai WA untuk jualan (studi kasus): promosi panen harian via WA — https://ejournal.baleliterasi.org/index.php/kasta/article/download/3130/1554 ; jual langsung via WA (jambu Rp10.000/kg), margin naik — https://jurnal.umpwr.ac.id/index.php/jrap/article/download/6606/2780/19772
+- Indonesian internet users 2024: 221,563,479 of a 278,696,200 population (79.5% penetration, up 1.4%); rural share 30.5% vs urban 69.5%; survey of 8,720 respondents in 38 provinces — https://apjii.or.id/berita/d/apjii-jumlah-pengguna-internet-indonesia-tembus-221-juta-orang
+- WhatsApp is Indonesia's #1 platform, used by ~90-90.8% of internet users monthly — https://www.ungkit.com/2026/10/the-most-widely-used-social-media.html ; Indonesia has 94.3 million users — a global top-3 country — https://searchengineland.com/guide/whatsapp-users
+- Indonesian social media audience 180 million (+26% YoY), 62.9% of population; WhatsApp leads monthly usage — https://www.marketing-interactive.com/report-indonesia-s-social-media-audience-hits-180-million-driving-brand-discovery
+- Farmers already sell via WA (case studies): daily harvest promotion via WA — https://ejournal.baleliterasi.org/index.php/kasta/article/download/3130/1554 ; direct selling via WA (guava Rp10,000/kg), margin up — https://jurnal.umpwr.ac.id/index.php/jrap/article/download/6606/2780/19772
 
-![Los sayur di pasar tradisional](public/landing-pasar.jpg)
-*Ilustrasi: harga pasar acuan Hai Tani berasal dari pasar tradisional (gambar ilustrasi Hai Tani).*
+![Vegetable stalls at a traditional market](public/landing-pasar.jpg)
+*Illustration: Hai Tani's reference prices come from traditional markets (Hai Tani illustration).*
 
-## Cerita Pivot
+## Pivot Story
 
-Hai Tani bermula sebagai asisten AI umum untuk petani: analisis penyakit via foto, tanya jawab obat dan pupuk berbasis riset, info harga pasar, plus dashboard monitoring data pertanian. Setelah berbincang dengan banyak petani, keluhan paling mendasar ternyata satu: akses menemukan buyer. Petani mengandalkan tengkulak yang itu-itu saja, panen dibeli murah, tengkulak menguasai penjualan di pasar, petani hanya dapat margin sangat tipis.
+Hai Tani started as a general AI assistant for farmers: photo-based disease analysis, medicine and fertilizer Q&A from verified research, market prices, plus a farm-data monitoring dashboard. After talking with many farmers, the most basic complaint turned out to be one thing: access to buyers. Farmers relied on the same middlemen, harvests were bought cheap, middlemen controlled market selling, farmers kept razor-thin margins.
 
-Fokus dipivokan ke matchmaking buyer: mempertemukan buyer yang cari barang dengan petani siap panen (atau akan panen) lewat negosiasi WhatsApp yang terdokumentasi, ditopang info harga pasar, direktori terverifikasi, dan peta sebaran.
+The focus pivoted to buyer matchmaking: connecting buyers looking for goods with ready-to-harvest (or soon-to-harvest) farmers through documented WhatsApp negotiation, backed by market prices, a verified directory, and a distribution map.
 
-## Alur Negosiasi
+## Negotiation Flow
 
 ```mermaid
 flowchart TD
-    A[Buyer chat WA] --> B[Bot sambut]
-    B --> C[Cari panen siap]
-    C --> D[Kirim daftar petani]
-    D --> E[Buyer pilih dan tawar]
-    E --> F[Bot teruskan ke petani]
-    F --> G{Petani setuju?}
-    G -->|Ya| H[Deal tercatat]
-    G -->|Tidak| I[Tawar ulang]
+    A[Buyer chats WA] --> B[Bot greets]
+    B --> C[Find ready harvest]
+    C --> D[Send farmer list]
+    D --> E[Buyer picks and bids]
+    E --> F[Bot forwards to farmer]
+    F --> G{Farmer agrees?}
+    G -->|Yes| H[Deal recorded]
+    G -->|No| I[Re-bid]
     I --> E
-    H --> J[Kas tercatat]
+    H --> J[Cash recorded]
 ```
 
-Detail: [docs/flow-negosiasi.md](docs/flow-negosiasi.md).
+Details: [docs/negotiation-flow.md](docs/negotiation-flow.md).
 
-## Fitur (hanya yang terbukti di repo)
+## Features (only repo-proven ones)
 
-- Backend Express + TypeScript + frontend React + Vite (skrip dev/build/start; server.ts, package.json, App.tsx).
-- Auth sesi + RBAC (login/logout, cookie sesi same-origin; App.tsx, main.tsx).
-- Dashboard admin 6 tab: Ringkasan, Simulator Chat, Data, Harga & Anomali, Data Scientist, Peta (App.tsx).
-- Simulator chatbot WA + pemutar voice note untuk petani lemah literasi teks (WhatsAppChatbot.tsx).
-- Webhook WhatsApp + forwarder stateless anti-loop dengan dukungan teks/button/lokasi/media suara-gambar-dokumen (server.ts, api/webhook/whatsapp.ts).
-- Dispatcher AI multi-provider + fallback berbasis aturan bila semua provider nonaktif (server.ts).
-- Layanan AI multimodal untuk transkripsi suara dan visi gambar/dokumen (server.ts).
-- Sinkronisasi spreadsheet write-behind: tab Petani/Supplier/Kas/Stok + komoditas/feedback, endpoint status dan sync-now, plus ekspor CSV/XLSX (lib/sheets-sync.ts, server.ts).
-- Konektor spreadsheet online: daftar, buat spreadsheet baru, baca metadata (modul layanan workspace).
-- Peta spasial sebaran petani/supplier + hitung jarak Haversine (FarmerSupplierMapView.tsx).
-- CRUD petani/supplier + modal tambah + toast status sinkronisasi (App.tsx).
-- Harga pasar + deteksi anomali/EWS + broadcast notifikasi + kelola harga buah (MarketAnomalyView.tsx, MarketPriceTable, FruitPriceManager).
-- Portal data scientist + kalkulator rekomendasi pupuk agronomi (DataScientistPortal, lib agronomy).
-- Sidecar intent Laya stdlib (8 intent: daftar_lahan s.d. lain) + endpoint status (laya_sidecar.py, App.tsx).
-- Kartu Tanda Registrasi PDF + QR + whitepaper arsitektur PDF (qrcode, generateArchitecturePdf).
-- Upload media + event-log training append-only (multer, data/training/*.jsonl).
-- Landing publik + direktori petani terverifikasi + peta publik + CTA wa.me (PublicView.tsx).
-- Halaman privasi Bahasa Indonesia (public/privacy.html).
+- Express + TypeScript backend + React + Vite frontend (dev/build/start scripts; server.ts, package.json, App.tsx).
+- Session auth + RBAC (login/logout, same-origin session cookie; App.tsx, main.tsx).
+- 6-tab admin dashboard: Overview, Chat Simulator, Data, Price & Anomalies, Data Scientist, Map (App.tsx).
+- WA chatbot simulator + voice-note player for low-text-literacy farmers (WhatsAppChatbot.tsx).
+- WhatsApp webhook + stateless anti-loop forwarder supporting text/button/location/voice-image-document media (server.ts, api/webhook/whatsapp.ts).
+- Multi-provider AI dispatcher + rule-based fallback when all providers are down (server.ts).
+- Multimodal AI service for voice transcription and image/document vision (server.ts).
+- Write-behind spreadsheet sync: Farmer/Supplier/Cash/Stock tabs + commodities/feedback, status and sync-now endpoints, plus CSV/XLSX export (lib/sheets-sync.ts, server.ts).
+- Online spreadsheet connector: list, create new spreadsheet, read metadata (workspace service module).
+- Spatial farmer/supplier map + Haversine distance (FarmerSupplierMapView.tsx).
+- Farmer/supplier CRUD + add modals + sync-status toasts (App.tsx).
+- Market prices + anomaly detection/EWS + notification broadcast + fruit price management (MarketAnomalyView.tsx, MarketPriceTable, FruitPriceManager).
+- Data scientist portal + agronomy fertilizer recommendation calculator (DataScientistPortal, lib agronomy).
+- Laya stdlib intent sidecar (8 intents: daftar_lahan through lain) + status endpoint (laya_sidecar.py, App.tsx).
+- Registration Card PDF + QR + architecture whitepaper PDF (qrcode, generateArchitecturePdf).
+- Media upload + append-only training event log (multer, data/training/*.jsonl).
+- Public landing + verified farmer directory + public map + wa.me CTA (PublicView.tsx).
+- Indonesian privacy page (public/privacy.html).
 
 ## WhatsApp Cloud API + Meta for Developers
 
-Sudut Meta (jujur: apa yang live vs roadmap):
+The Meta angle (honest: what is live vs roadmap):
 
-Sudah ada di kode (pola resmi Meta):
+Already in code (official Meta patterns):
 
-- Verifikasi webhook GET: baca hub.mode/hub.verify_token/hub.challenge, cocokkan token, balas 200 + challenge bila mode=subscribe, else 403 (server.ts). Acuan resmi: https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint
-- Webhook POST: parse entry.changes[0].value.messages[0] (teks/button/lokasi) + entry.statuses ke log; verifikasi header X-Hub-Signature-256 HMAC-SHA256 terhadap app secret memakai rawBody; gerbang opsional FORWARD_SECRET; balas 200 EVENT_RECEIVED (server.ts).
-- Outbound Cloud API: POST graph.facebook.com/v24.0/{phoneId}/messages dengan Bearer token (sendWaText dan sendWaTemplate: nama template + language code + parameter body); template pembuka info_terbaru_taniai; kode mencatat konsep jendela layanan pelanggan (server.ts). Acuan template: https://developers.facebook.com/documentation/business-messaging/whatsapp/templates/overview ; token produksi: https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens ; izin: https://developers.facebook.com/documentation/business-messaging/whatsapp/permissions
+- Webhook GET verification: reads hub.mode/hub.verify_token/hub.challenge, matches the token, replies 200 + challenge when mode=subscribe, else 403 (server.ts). Official reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint
+- Webhook POST: parses entry.changes[0].value.messages[0] (text/button/location) + entry.statuses to log; verifies the X-Hub-Signature-256 header (HMAC-SHA256 over rawBody against the app secret); optional FORWARD_SECRET gate; replies 200 EVENT_RECEIVED (server.ts).
+- Outbound Cloud API: POST graph.facebook.com/v24.0/{phoneId}/messages with a Bearer token (sendWaText and sendWaTemplate: template name + language code + body parameters); starter template info_terbaru_taniai; the code notes the customer-service window concept (server.ts). Template reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/templates/overview ; production tokens: https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens ; permissions: https://developers.facebook.com/documentation/business-messaging/whatsapp/permissions
 
-Belum / roadmap:
+Not yet / roadmap:
 
-- Media API Cloud API belum dipakai (tidak ada pemakaian /media atau media_id di repo).
-- Status live produksi belum terverifikasi (berkas .env berisi secret tidak dibuka audit; belum dicek di App Dashboard).
-- Skema harga per percakapan, durasi verifikasi bisnis, dan batas waktu respons webhook belum diteliti dari sumber primer — jangan dikutip sebagai fakta.
+- Cloud API Media API not used (no /media or media_id usage in the repo).
+- Production live status unverified (.env holds secrets and was not opened in audit; not checked in the App Dashboard).
+- Per-conversation pricing, business verification duration, and webhook response-time limits not researched from primary sources — do not quote as fact.
 
-## Manfaat per Stakeholder
+## Stakeholder Benefits
 
-- Petani: acuan harga pasar untuk posisi tawar; negosiasi langsung dengan buyer via chat + voice note; klinik tanaman + info kios saprodi terdekat; kartu registrasi QR untuk identitas program. Risiko: petani yang hanya bisa WA dasar dan terkendala sinyal/perangkat tetap sulit memakai peta/dashboard — https://journal.unhas.ac.id/index.php/jsep/article/download/46768/13436
-- Tengkulak/pengumpul: kepastian pasokan via peta sebaran + direktori terverifikasi; negosiasi terdokumentasi; sinyal harga dan alarm anomali; pencatatan mitra rapi. Risiko: transparansi harga menggerus margin yang hidup dari asimetri informasi — https://jurnal.unived.ac.id/index.php/agritepa/article/download/8664/6968/ ; sebagian pengumpul bisa menolak adopsi.
-- Buyer/offtaker: sourcing terverifikasi (lokasi, komoditas, kontak); negosiasi langsung; perencanaan beli dari harga live + tren + alarm anomali; analitik agregasi pasokan. Risiko: data crowd-input bisa basi tanpa SLA update dan verifikasi lapangan.
-- Pemerintah/dinas/PPL: monitoring harga + broadcast anomali melengkapi SP2KP (~514 kab/kota) — https://jawawa.id/newsitem/wamendag-government-to-clamp-down-on-minyakita-sales-above-the-price-ceiling-1772776818 ; chatbot sebagai perpanjangan PPL (rasio penyuluh-petani ~1:1.500 — https://journal.lenvari.org/issr/article/download/345/188/2233); pendataan + kartu QR; operasi lapangan. Risiko: chatbot bukan pengganti kunjungan lapangan — https://journal.papsel.org/index.php/JPD/article/download/340/309
-- Kios saprodi: ditemukan petani via pencarian kios terdekat + pin peta; pendaftaran mudah; prediksi permintaan dari jadwal tanam/panen; kartu QR dukung penebusan tepat sasaran (konteks iPubers — https://journal.unpas.ac.id/index.php/pendas/article/download/41894/22640). Risiko: kios nakal di atas HET terancam transparansi.
+- Farmers: market price reference for bargaining power; direct negotiation with buyers via chat + voice note; crop clinic + nearest farm-shop info; QR registration card for program identity. Risk: farmers limited to basic WA with poor signal/devices still struggle with the map/dashboard — https://journal.unhas.ac.id/index.php/jsep/article/download/46768/13436
+- Middlemen/collectors: supply certainty via distribution map + verified directory; documented negotiation; price signals and anomaly alarms; tidy partner records. Risk: price transparency erodes margins that live on information asymmetry — https://jurnal.unived.ac.id/index.php/agritepa/article/download/8664/6968/ ; some collectors may resist adoption.
+- Buyers/offtakers: verified sourcing (location, commodity, contact); direct negotiation; buy planning from live prices + trends + anomaly alarms; supply aggregation analytics. Risk: crowd-input data can go stale without update SLAs and field verification.
+- Government/agency/extension (PPL): price monitoring + anomaly broadcast complementing SP2KP (~514 districts/cities) — https://jawawa.id/newsitem/wamendag-government-to-clamp-down-on-minyakita-sales-above-the-price-ceiling-1772776818 ; chatbot as PPL extension (officer-to-farmer ratio ~1:1,500 — https://journal.lenvari.org/issr/article/download/345/188/2233); farmer census + QR cards; field operations. Risk: a chatbot does not replace field visits — https://journal.papsel.org/index.php/JPD/article/download/340/309
+- Farm shops (kios saprodi): discovered by farmers via nearest-shop search + map pins; easy registration; demand prediction from planting/harvest schedules; QR card supports targeted subsidy redemption (iPubers context — https://journal.unpas.ac.id/index.php/pendas/article/download/41894/22640). Risk: rogue shops above the price ceiling are threatened by transparency.
 
-Catatan: tingkat adopsi aktual (petani/buyer terdaftar, volume negosiasi) belum ada datanya; manfaat di atas bersifat potensial berbasis fitur, bukan hasil terukur.
+Note: actual adoption (registered farmers/buyers, negotiation volume) has no data yet; benefits above are feature-based potential, not measured results.
 
-## Pasar: TOM/SAM/SOM (ringkas)
+## Market: TOM/SAM/SOM (summary)
 
-- TOM belanja agritech 2023: USD 885,7 juta ≈ Rp14,0 T (pembanding USD 500 juta ≈ Rp7,9 T) → rentang Rp7,9-14,0 T; proyeksi 2033 ≈ Rp48,0 T; sub-segmen AI-pertanian 2025 ≈ Rp2,2 T. Sumber: https://www.kdmarketinsights.com/reports/indonesia-agritech-market/7611 , https://startuprise.org/agritech-startups-of-indonesia-2024/ , https://mobilityforesights.com/product/indonesia-artificial-intelligence-in-agriculture-market
-- SAM petani terjangkau via WA (batas atas): 29,34 juta UTP × 79,5% × 90% ≈ 21,0 juta petani × ARPU Rp100-300 rb/tahun ≈ Rp2,1-6,3 T/tahun. Sumber basis: Sensus Pertanian, APJII, data WA di atas. ARPU = asumsi penulis, perlu validasi lapangan.
-- SOM 3-5 tahun (Jawa-Sumatera, hortikultura): asumsi pangsa 1-3% dari SAM → Rp21-189 M/tahun (langganan). Benchmark: Sayurbox ~1 juta pelanggan, >10.000 petani mitra, Series C $120 juta — https://startuprise.org/agritech-startups-of-indonesia-2024/
-- Detail angka + asumsi: [docs/pasar-TOM-SAM-SOM.md](docs/pasar-TOM-SAM-SOM.md).
+- 2023 agritech spend TOM: USD 885.7M ≈ Rp14.0T (cross-check USD 500M ≈ Rp7.9T) → Rp7.9-14.0T range; 2033 projection ≈ Rp48.0T; AI-in-agriculture sub-segment 2025 ≈ Rp2.2T. Sources: https://www.kdmarketinsights.com/reports/indonesia-agritech-market/7611 , https://startuprise.org/agritech-startups-of-indonesia-2024/ , https://mobilityforesights.com/product/indonesia-artificial-intelligence-in-agriculture-market
+- WA-reachable farmer SAM (upper bound): 29.34M farm businesses × 79.5% × 90% ≈ 21.0M farmers × Rp100-300K/year ARPU ≈ Rp2.1-6.3T/year. Basis: Agricultural Census, APJII, WA data above. ARPU = author assumption, needs field validation.
+- 3-5 year SOM (Java-Sumatra, horticulture): assumed 1-3% share of SAM → Rp21-189M/year (subscription). Benchmark: Sayurbox ~1M customers, >10,000 partner farmers, $120M Series C — https://startuprise.org/agritech-startups-of-indonesia-2024/
+- Full figures + assumptions: [docs/market-TOM-SAM-SOM.md](docs/market-TOM-SAM-SOM.md).
 
 ## Founder
 
-Pernyataan founder:
+Founder statement:
 
 EN: Hello Farmers, I am Mochammad Setiawan Putra, an ornamental plant farmer with 6 years of experience. I run SnS Nursery in Batu, East Java, Indonesia, serving plant requests by DM and shipping worldwide.
 
-ID: Halo Para Petani, saya Mochammad Setiawan Putra, petani tanaman hias dengan pengalaman 6 tahun. Saya menjalankan SnS Nursery di Batu, Jawa Timur, Indonesia, melayani permintaan tanaman melalui DM dan pengiriman ke seluruh dunia.
+Independently verified:
 
-Terverifikasi independen:
+- Account https://www.instagram.com/sns.nursery = "SnS Nursery", Batu – East Java; bio: worldwide shipping, requests via DM (2,236 followers at fetch time).
+- 19/12/2021 invoice — https://www.scribd.com/document/827076449/Invoice-Tal-011221 proves SNS Nursery Batu has sold ornamental plants since at least Dec 2021.
+- Profile https://www.facebook.com/Blokir88 shows the name "Setiawan Putra" (rest of the profile needs login).
+- LinkedIn https://www.linkedin.com/in/mochammad-setiawan-putra-07a6268a/ (slug exactly matches the full name; profile content cannot be auto-fetched due to LinkedIn anti-scrape blocking).
 
-- Akun https://www.instagram.com/sns.nursery = "SnS Nursery", Batu – Jawa Timur; bio: kirim worldwide, request via DM (2.236 followers saat fetch).
-- Invoice 19/12/2021 — https://www.scribd.com/document/827076449/Invoice-Tal-011221 membuktikan SNS Nursery Batu aktif jual tanaman hias minimal sejak Des 2021.
-- Profil https://www.facebook.com/Blokir88 menampilkan nama "Setiawan Putra" (isi profil selebihnya butuh login).
-- LinkedIn https://www.linkedin.com/in/mochammad-setiawan-putra-07a6268a/ (slug persis nama lengkap; isi profil tidak dapat difetch otomatis karena blokir anti-scrape LinkedIn).
+Not yet publicly verified: the link between the founder's name and the nursery account, and the 6-year duration claim (needs direct evidence such as a bio/screenshot naming both).
 
-Belum terverifikasi publik: kaitan nama founder dengan akun nursery tersebut dan klaim durasi 6 tahun (butuh bukti langsung seperti bio/tangkapan layar yang menyebut keduanya).
+## Architecture (short)
 
-## Arsitektur (singkat)
+React + Vite client (admin dashboard, chat simulator, map, public landing) → Express + TypeScript server (session auth, CRUD, price/anomaly, export) → WhatsApp webhook (subscribe verification, HMAC signature, forwarder) → multi-provider AI dispatcher + rule fallback → local data + write-behind spreadsheet sync → Laya intent sidecar → QR card and PDF output.
 
-Klien React + Vite (dashboard admin, simulator chat, peta, landing publik) → server Express + TypeScript (auth sesi, CRUD, harga/anomali, ekspor) → webhook WhatsApp (verifikasi subscribe, signature HMAC, forwarder) → dispatcher AI multi-provider + fallback aturan → data lokal + sinkronisasi spreadsheet write-behind → sidecar intent Laya → output kartu QR dan PDF.
+## Local Setup
 
-## Cara Jalan Lokal
-
-Prasyarat: Node.js + npm.
+Prerequisite: Node.js + npm.
 
 ```bash
 npm install
 npm run dev
 ```
 
-Server: http://127.0.0.1:3000 (default `PORT` bila env tidak diisi; lihat server.ts). Build/produksi: `npm run build` lalu `npm start`. Env minimum untuk webhook WA: WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, token akses + ID nomor telepon (lihat server.ts). Kunci layanan AI dan sinkronisasi spreadsheet opsional sesuai kebutuhan.
+Server: http://127.0.0.1:3000 (default `PORT` when the env is unset; see server.ts). Build/production: `npm run build` then `npm start`. Minimum env for the WA webhook: WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET, access token + phone number ID (see server.ts). AI service keys and spreadsheet sync are optional as needed.
 
-## Bukti Uji (Fase 3)
+## Test Evidence (Phase 3, in Indonesian)
 
-- [Rekap uji fungsional 100/100](docs/fase3/01-rekap-uji-fungsional.md)
-- [Uji stres 104 rps, 0 gagal](docs/fase3/02-uji-stres.md)
-- [Pra-audit aksesibilitas WCAG](docs/fase3/03-aksesibilitas-wcag.md)
+- [Functional test recap 100/100](docs/fase3/01-rekap-uji-fungsional.md)
+- [Stress test 104 rps, 0 failures](docs/fase3/02-uji-stres.md)
+- [WCAG accessibility pre-audit](docs/fase3/03-aksesibilitas-wcag.md)
 
-## Lisensi
+## License
 
-TBD — tentukan sebelum rilis publik (mis. proprietary / MIT / Apache-2.0).
+TBD — decide before public release (e.g. proprietary / MIT / Apache-2.0).
 
-## Kredit Tool
+## Tool Credit
 
-Dibangun dengan Muse Code (Meta).
+Built with Muse Code (Meta).
