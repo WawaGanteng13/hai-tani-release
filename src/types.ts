@@ -118,7 +118,7 @@ export interface AdminUser {
 
 export type UserRole = 'PETANI' | 'BUYER' | 'SUPPLIER';
 export type OnboardingState = 'NEW' | 'TOS_SENT' | 'ROLE_ASK' | 'LOC_ASK' | 'DONE' | 'DONE_WEAK' | 'DECLINED';
-export type UserTier = 'FREE' | 'PAID';
+export type UserTier = 'FREE' | 'PAID' | 'TUNAS' | 'TUMBUH' | 'PANEN';
 export type UserStatus = 'ACTIVE' | 'DECLINED' | 'FLAGGED' | 'BLOCKED';
 
 // F1: identitas + onboarding + anti-spam per nomor WA (users_db.json).
