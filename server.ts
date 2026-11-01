@@ -1,4 +1,4 @@
-﻿import express from "express";
+import express from "express";
 import path from "path";
 import fs from "fs";
 import { spawn, ChildProcess } from "child_process";
@@ -7383,7 +7383,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         touchUser(user);
         return { reply: ROLE_ASK_TEXT, quickReplies: ["Petani", "Buyer", "Supplier"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
       }
-      if (/harga|cek |cek$|berapa|bantuan|help|menu|manfaat|benefit|program|tentang/.test(lower)) return null;
+      if (/harga|cek |cek$|berapa|bantuan|help|menu|manfaat|benefit|program|tentang|langganan/.test(lower)) return null;
       if (!user.declineNoticed) {
         user.declineNoticed = true;
         touchUser(user);
@@ -7426,6 +7426,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       }
       user.onboardingTries = (user.onboardingTries || 0) + 1;
       touchUser(user);
+      if (/langganan/.test(lower)) return null; // info harga publik -> cabang 0e-tier
       const short = user.onboardingTries >= 2;
       return { reply: short ? "Balas *SETUJU* untuk menyetujui Syarat & Ketentuan, atau *TOLAK*." : `${TOS_TEXT_FINAL}\n\n_Balas *SETUJU* untuk lanjut, atau *TOLAK*._`, quickReplies: ["SETUJU"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
     }
@@ -8459,10 +8460,33 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       if (/^\s*(kartu saya|kartu tani saya|cetak kartu)\s*$/i.test(msgK)) {
         const me = normalizePhone(String(effPhone || senderPhone || ""));
         const f = farmersDb.find((x) => normalizePhone(x.noHp) === me) || null;
+        // Kartu QR = manfaat tier Tumbuh+ (proposal revenue). FREE/Tunas
+        // diarahkan ke info langganan; admin "kartu TANI-xxx" tak berubah.
+        const tierK = f ? tierOfPhone(f.noHp || "") : "FREE";
+        if (f && tierK !== "TUMBUH" && tierK !== "PANEN" && tierK !== "PAID") {
+          return kartuReply(`Kartu registrasi QR adalah manfaat tier *Tumbuh* ke atas.\n\nTier kamu saat ini: *${tierK}* (komisi ${TIER_COMMISSION_PCT[tierK] ?? 5}%).\n\nKetik *langganan* untuk info tier & cara upgrade.`, ["Langganan", "Bantuan"]);
+        }
         if (!f) return kartuReply("ℹ️ Nomor ini belum terdaftar sebagai petani. Ketik *daftar* untuk mendaftar, lalu kartu bisa dicetak.", ["Daftar", "Bantuan"]);
         const base = kartuPublicBase(String((req as any)?.get?.("host") || ""));
         return kartuReply(`🪪 *Kartu Tanda Registrasi ${f.id}*\n• ${f.nama}\n• ${f.komoditas} — ${f.luasLahanFormatted || f.luasLahan + " Ha"}\n• Status: ${f.statusVerifikasi}\n\nUnduh PDF + QR:\n${base}/api/kartu/${encodeURIComponent(f.id)}`,
           ["Cek Harga Pasar Hari Ini", "Bantuan"]);
+      }
+    }
+
+    // 0e-tier (F9). Info langganan + cara bayar: "langganan".
+    // Dijangkar penuh agar tak membajak intent fungsional; lolos gate
+    // onboarding (allowlist handleOnboarding) agar info harga publik.
+    {
+      const msgL = String(message || "");
+      if (/^\s*(mau\s+|daftar\s+|cara\s+|info\s+|biaya\s+|harga\s+)?langganan\s*\??\s*$/i.test(msgL)) {
+        const meL = normalizePhone(String(effPhone || senderPhone || ""));
+        const myTier = tierOfPhone(meL);
+        const myPct = TIER_COMMISSION_PCT[myTier] ?? 5;
+        return res.json({
+          reply: `*Langganan Hai Tani*\n\nTier kamu saat ini: *${myTier}* (komisi ${myPct}%).\n\n- *Tunas* — Gratis. Komisi 5% per deal.\n- *Tumbuh* — Rp25rb/bln. Komisi 2% + kartu registrasi QR.\n- *Panen* — Rp75rb/bln. Komisi 0%.\n\n*Cara bayar:* transfer ke rekening Hai Tani (minta nomor rekening ke admin/PPL), lalu kirim bukti transfer di chat ini. Admin verifikasi & tier aktif maks. 1x24 jam.\n\nDasbor harga & peta publik tetap gratis tanpa login.`,
+          quickReplies: ["Cek Harga Pasar Hari Ini", "Bantuan"],
+          extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based",
+        } as any);
       }
     }
 

@@ -2,6 +2,8 @@
 
 Model: core features free; paid tiers cut commission and unlock deeper records and advice. All figures in Rupiah; M = miliar (billion), jt = juta (million).
 
+Utility today: the public dashboard (market prices, farmer/shop map, statistics) is free without login — that is Hai Tani's live utility, and it stays free. Subscriptions pay for the agentic layer on top: negotiation, matchmaking, records, and clinic advice. Nobody pays for what is already public.
+
 ## Tiers (proposal)
 
 | | Tunas (Free) | Tumbuh Rp25rb/bln (Rp250rb/thn) | Panen Rp75rb/bln (Rp750rb/thn) |
@@ -15,6 +17,10 @@ Model: core features free; paid tiers cut commission and unlock deeper records a
 | Carbon-record ready | No | No | Yes |
 
 Buyer seat "Mitra" Rp150rb/bln (sourcing analytics, verified directory) - optional 4th tier, excluded from math below.
+
+Enforcement status (honest): of the table above, only the commission column is enforced in code today (`tierOfPhone` + `TIER_COMMISSION_PCT` in server.ts; QR card gated to Tumbuh+ via chat). Plot caps, record export, clinic gating, carbon readiness, and poktan multi-user have no enforcement yet — they are milestones, not shipped gates. Subscription prices are readable in-chat via the `langganan` command.
+
+Payment design: subscriptions are paid by bank transfer to Hai Tani's own account, verified manually by an admin (chat `tier` command) — no gateway needed for our own revenue. Deal money between buyer and farmer is the opposite: it must flow through a licensed payment gateway/escrow partner, never through Hai Tani's account (Indonesian law: OJK 20/POJK.04/2021, Act 3/2011 — see [business-flow.md](business-flow.md)). Hai Tani supervises every trade step but never holds deal funds.
 
 ## Basis numbers (explicit assumptions)
 

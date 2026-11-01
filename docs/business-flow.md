@@ -26,6 +26,8 @@ flowchart LR
 
 Buyer → licensed partner escrow → released to farmer on delivery confirmation. Hai Tani orchestrates and records every step but never holds deal funds itself, because independent escrow requires a license: OJK Regulation 20/POJK.04/2021 requires licensed institutions as escrow agents, fund transfers fall under Act 3/2011, and informal rekber has no clear legal basis (UM Sorong journal, May 2025 — https://ejournal.um-sorong.ac.id/index.php/js/article/download/4213/2202/19988).
 
+Two money rails, kept separate: (1) deal funds ride a licensed payment gateway/escrow partner and Hai Tani supervises execution for both sides' safety; (2) subscription fees are ordinary revenue, paid by bank transfer to Hai Tani's own account and verified manually by an admin (see [revenue-streams.md](revenue-streams.md)). Only rail (1) needs a license — that is why the gateway lives there and not in subscriptions.
+
 ## Fintech Caution (learned, not repeated)
 
 Hai Tani does NOT run P2P lending. TaniFund hit a 63.93% 90-day default rate and a prosecutor corruption/money-laundering probe; iGrow ended in legal dispute (OJK/Bareskrim escalation) — https://legal.isha.or.id/index.php/legal/article/download/1376/856 , https://indonesiabusinesspost.com/4919/financial-crimes/ojk-cracks-down-on-rising-fraud-cases-in-fintech-lending-sector. Lending stays with licensed banks; Hai Tani supplies the data pipeline and collection context only.

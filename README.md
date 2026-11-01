@@ -56,7 +56,7 @@ Details: [docs/negotiation-flow.md](docs/negotiation-flow.md).
 ## Features (only repo-proven ones)
 
 - Express + TypeScript backend + React + Vite frontend (dev/build/start scripts; server.ts, package.json, App.tsx).
-- Session auth + RBAC (login/logout, same-origin session cookie; App.tsx, main.tsx).
+- Session auth (login/logout, same-origin session cookie; all logged-in sessions currently equal, role separation is roadmap; App.tsx, main.tsx).
 - 6-tab admin dashboard: Overview, Chat Simulator, Data, Price & Anomalies, Data Scientist, Map (App.tsx).
 - WA chatbot simulator + voice-note player for low-text-literacy farmers (WhatsAppChatbot.tsx).
 - WhatsApp webhook + stateless anti-loop forwarder supporting text/button/location/voice-image-document media (server.ts, api/webhook/whatsapp.ts).
@@ -116,6 +116,8 @@ Farmers: log every unburned residue, every kilogram of fertilizer saved, every t
 ## Revenue Streams
 
 Freemium plus negotiation-spread revenue: the agentic 2-way bargaining (buyer budget vs farmer ask) creates the spread, and Hai Tani takes at most a tiered cap — 5% free core, 2% Tumbuh Rp25rb/mo, 0% Panen Rp75rb/mo with full records and analytics — returning the remainder to the farmer. At 10k farmers the model yields ~Rp7.46B/year, commission-dominated and benchmarked inside Shopee/Tokopedia 1-8% norms. Full tiers, math, and verification: [docs/revenue-streams.md](docs/revenue-streams.md). Underlying costs and burn vs revenue: [docs/cost-structure.md](docs/cost-structure.md).
+
+Free vs paid: the public dashboard (prices, map, statistics) and WA price info are free without login, forever. Paying buys the agentic layer: Tumbuh Rp25rb/mo cuts commission to 2% and unlocks the QR registration card (both live); Panen Rp75rb/mo cuts commission to 0% (live). Full records + export, clinic priority, analytics/forecast, carbon readiness, and poktan multi-user are roadmap milestones, not shipped gates. Subscriptions are paid by bank transfer to Hai Tani's account (verified manually by an admin); buyer-farmer deal money rides a licensed gateway, never our account. Chat `langganan` for tier info.
 
 ## Business Flow
 
