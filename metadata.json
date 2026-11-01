@@ -1,6 +1,6 @@
 {
-  "name": "Remix TaniAI - WhatsApp \u0026 Google Sheets Agent",
-  "description": "Platform agritech terintegrasi Google Sheets & WhatsApp AI: pendaftaran data petani & supplier saprodi pertanian secara otomatis, visualisasi sebaran geospasial, deteksi anomali harga pasar, dan rekomendasi rantai pasok.",
+  "name": "Hai Tani - Asisten Pasar Tani via WhatsApp",
+  "description": "Hai Tani: mempertemukan buyer dengan petani siap panen via negosiasi WhatsApp, info harga pasar, peta sebaran, dan kartu registrasi QR.",
   "requestFramePermissions": [
     "microphone",
     "geolocation"
