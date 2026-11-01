@@ -107,6 +107,12 @@ Note: actual adoption (registered farmers/buyers, negotiation volume) has no dat
 - 3-5 year SOM (Java-Sumatra, horticulture): assumed 1-3% share of SAM → Rp21-189M/year (subscription). Benchmark: Sayurbox ~1M customers, >10,000 partner farmers, $120M Series C — https://startuprise.org/agritech-startups-of-indonesia-2024/
 - Full figures + assumptions: [docs/market-TOM-SAM-SOM.md](docs/market-TOM-SAM-SOM.md).
 
+## Carbon Roadmap
+
+Hai Tani's farm activity logs are built to become carbon value. Verified landscape: IDXCarbon (~1.98M tCO2e / Rp93.81B through June 2026), mandatory SRN PPI registry, and Agriculture Regulation 18/2026 opening rice/livestock/plantation credits with mandatory farmer benefit-sharing. Hai Tani positions as the MRV data pipeline feeding aggregators (e.g. Fairatmos) and standards (Verra / Gold Standard / Plan Vivo) — profit shared with farmers.
+
+Farmers: log every unburned residue, every kilogram of fertilizer saved, every tree planted. Full intent, architecture, and data-gap plan: [docs/carbon-roadmap.md](docs/carbon-roadmap.md).
+
 ## Founder
 
 Founder statement:
