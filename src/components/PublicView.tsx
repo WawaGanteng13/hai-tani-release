@@ -297,7 +297,7 @@ export const PublicView: React.FC = () => {
               </a>
               <a
                 href="#harga"
-                className="text-sm font-semibold text-slate-700 border border-slate-300 hover:border-slate-400 rounded-lg px-5 py-2.5 transition active:scale-[0.98]"
+                className="text-sm font-semibold text-slate-700 border border-slate-300 hover:border-slate-500 rounded-lg px-5 py-2.5 transition active:scale-[0.98]"
               >
                 Lihat harga pasar
               </a>
@@ -622,7 +622,7 @@ export const PublicView: React.FC = () => {
           </nav>
         </div>
         <div className="border-t border-slate-200">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap gap-x-6 gap-y-1 justify-between text-xs text-slate-400">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap gap-x-6 gap-y-1 justify-between text-xs text-slate-500">
             <span>Dari Petani, untuk Kesejahteraan Petani.</span>
             <span>© 2026 Hai Tani.</span>
           </div>

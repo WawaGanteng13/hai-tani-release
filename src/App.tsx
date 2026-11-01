@@ -392,7 +392,7 @@ function AdminApp() {
             <input
               id="login-nohp" type="text" value={loginNoHp} onChange={(e) => setLoginNoHp(e.target.value)}
               placeholder="cth. 62812xxxxxxx" required autoComplete="username"
-              className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-400"
+              className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-500"
             />
           </div>
           <div>
@@ -400,7 +400,7 @@ function AdminApp() {
             <input
               id="login-pass" type="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)}
               placeholder="Password" required autoComplete="current-password"
-              className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-400"
+              className="w-full text-sm px-3 py-2 border border-slate-300 rounded-xl focus:ring-1 focus:ring-emerald-500 focus:outline-none placeholder:text-slate-500"
             />
           </div>
           <button type="submit" disabled={loginBusy} className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold disabled:opacity-50">

@@ -742,13 +742,14 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
         {/* Search Bar */}
         <div className="pt-2 border-t border-slate-100 flex items-center">
           <div className="relative flex-1">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
+              aria-label="Cari petani"
               placeholder="Cari nama, desa, atau komoditas..."
-              className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none placeholder-slate-400"
+              className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-none placeholder-slate-500"
             />
           </div>
         </div>
@@ -1235,7 +1236,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
             <tbody className="divide-y divide-slate-100 text-slate-700">
               {sortedAndFilteredFarmers.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-10 text-center text-slate-400">
+                  <td colSpan={10} className="py-10 text-center text-slate-500">
                     <Info className="w-6 h-6 mx-auto mb-2 text-slate-300" />
                     Tidak ada data petani yang cocok dengan filter yang dipilih.
                   </td>
@@ -1253,7 +1254,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
                       onClick={() => setSelectedFarmerDetail(farmer)}
                     >
                       {/* Row index */}
-                      <td className="py-2.5 px-3 font-mono text-[11px] text-slate-400">
+                      <td className="py-2.5 px-3 font-mono text-[11px] text-slate-500">
                         #{farmer.googleSheetRow || index + 2}
                       </td>
 
@@ -1266,7 +1267,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
                       {/* Location */}
                       <td className="py-2.5 px-3">
                         <div className="text-slate-800 font-medium">{farmer.kabupaten || 'Lainnya'}</div>
-                        <div className="text-[11px] text-slate-400 truncate max-w-[160px]">{farmer.alamat}</div>
+                        <div className="text-[11px] text-slate-500 truncate max-w-[160px]">{farmer.alamat}</div>
                       </td>
 
                       {/* Crop & Variety */}
@@ -1289,7 +1290,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
                       {/* Yield Ton & Schedule */}
                       <td className="py-2.5 px-3 text-right">
                         <div className="font-mono font-bold text-amber-700">{farmer.estimasiHasilTon} Ton</div>
-                        <div className="text-[10px] text-slate-400">{farmer.estimasiPanen}</div>
+                        <div className="text-[10px] text-slate-500">{farmer.estimasiPanen}</div>
                       </td>
 
                       {/* Productivity Ton/Ha */}
@@ -1372,7 +1373,7 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
               </div>
               <button
                 onClick={() => setSelectedFarmerDetail(null)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-md cursor-pointer"
+                className="text-slate-500 hover:text-slate-600 p-1 rounded-md cursor-pointer"
               >
                 ✕
               </button>
@@ -1380,23 +1381,23 @@ ${harvestTimeline.map((h) => `- ${h.period}: ${h.ton} Ton (${h.petani} Petani)`)
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div className="p-2.5 bg-slate-50 rounded-xl">
-                <span className="text-slate-400 block text-[11px]">Komoditas & Varietas:</span>
+                <span className="text-slate-500 block text-[11px]">Komoditas & Varietas:</span>
                 <span className="font-bold text-slate-800">
                   {selectedFarmerDetail.komoditas} ({selectedFarmerDetail.varietas || 'Lokal'})
                 </span>
               </div>
               <div className="p-2.5 bg-slate-50 rounded-xl">
-                <span className="text-slate-400 block text-[11px]">Luas & Estimasi Panen:</span>
+                <span className="text-slate-500 block text-[11px]">Luas & Estimasi Panen:</span>
                 <span className="font-bold text-slate-800">
                   {selectedFarmerDetail.luasLahan} Ha / {selectedFarmerDetail.estimasiHasilTon} Ton
                 </span>
               </div>
               <div className="p-2.5 bg-slate-50 rounded-xl">
-                <span className="text-slate-400 block text-[11px]">Wilayah:</span>
+                <span className="text-slate-500 block text-[11px]">Wilayah:</span>
                 <span className="font-bold text-slate-800">{selectedFarmerDetail.kabupaten || 'Indonesia'}</span>
               </div>
               <div className="p-2.5 bg-slate-50 rounded-xl">
-                <span className="text-slate-400 block text-[11px]">Jadwal Panen:</span>
+                <span className="text-slate-500 block text-[11px]">Jadwal Panen:</span>
                 <span className="font-bold text-amber-700">{selectedFarmerDetail.estimasiPanen}</span>
               </div>
             </div>

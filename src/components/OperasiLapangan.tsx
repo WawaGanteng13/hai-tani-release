@@ -180,7 +180,7 @@ const KlinikTanaman: React.FC<{ crops: string[]; onUjiChat?: () => void }> = ({ 
               <span className="font-semibold text-slate-700">{hasil.jadwalAplikasi[0].fase}:</span> {hasil.jadwalAplikasi[0].komposisi}
             </p>
           )}
-          <p className="text-[11px] text-slate-400">Acuan Balitbangtan/Kementan untuk {hasil.luasLahanHa} Ha.</p>
+          <p className="text-[11px] text-slate-500">Acuan Balitbangtan/Kementan untuk {hasil.luasLahanHa} Ha.</p>
         </div>
       ) : !error && (
         <p className="text-[11px] text-slate-500 leading-snug">
@@ -205,7 +205,7 @@ function ikonAksi(aksi: string) {
   if (aksi === 'price' || aksi === 'budget') return <Tag className={`${cls} text-amber-600`} />;
   if (aksi === 'flagged' || aksi === 'followup_fail') return <Flag className={`${cls} text-rose-600`} />;
   if (aksi === 'followup') return <BellRing className={`${cls} text-indigo-600`} />;
-  return <Info className={`${cls} text-slate-400`} />;
+  return <Info className={`${cls} text-slate-500`} />;
 }
 
 const ArusAktivitas: React.FC = () => {
@@ -253,7 +253,7 @@ const ArusAktivitas: React.FC = () => {
         <li key={`${it.ts}-${i}`} className="py-2 flex items-center gap-2.5 min-w-0 sm:border-b sm:border-slate-100">
           {ikonAksi(it.aksi)}
           <span className="flex-1 min-w-0 text-[11px] text-slate-700 truncate">{it.teks}</span>
-          <span className="text-[10px] text-slate-400 shrink-0 tabular-nums">{relatif(it.ts)}</span>
+          <span className="text-[10px] text-slate-500 shrink-0 tabular-nums">{relatif(it.ts)}</span>
         </li>
       ))}
     </ul>

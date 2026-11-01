@@ -99,7 +99,7 @@ export const MarketPriceTable: React.FC<{ sumber?: string; badge?: string; title
         </div>
         <div className="flex items-center gap-2 sm:ml-auto">
           <div className="relative flex-1 sm:w-56">
-            <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
             <input
               type="text"
               value={query}
@@ -151,7 +151,7 @@ export const MarketPriceTable: React.FC<{ sumber?: string; badge?: string; title
           </div>
         ) : data && data.daftar.length === 0 ? (
           <div className="border border-slate-200 rounded-xl p-5 text-center">
-            <Database className="w-6 h-6 text-slate-400 mx-auto mb-2" />
+            <Database className="w-6 h-6 text-slate-500 mx-auto mb-2" />
             <p className="text-sm font-semibold text-slate-900">Belum ada data harga</p>
             <p className="text-xs text-slate-500 mt-1">
               Tabel {badge} kosong untuk tanggal {data.tanggal}. Coba muat ulang.
@@ -166,7 +166,7 @@ export const MarketPriceTable: React.FC<{ sumber?: string; badge?: string; title
           </div>
         ) : rows.length === 0 ? (
           <div className="border border-slate-200 rounded-xl p-5 text-center">
-            <SearchX className="w-6 h-6 text-slate-400 mx-auto mb-2" />
+            <SearchX className="w-6 h-6 text-slate-500 mx-auto mb-2" />
             <p className="text-sm font-semibold text-slate-900">Tidak ada hasil untuk &quot;{query.trim()}&quot;</p>
             <p className="text-xs text-slate-500 mt-1">Coba kata kunci lain atau hapus pencarian.</p>
             <button
@@ -191,7 +191,7 @@ export const MarketPriceTable: React.FC<{ sumber?: string; badge?: string; title
               <tbody className="divide-y divide-slate-100">
                 {rows.map((it, i) => (
                   <tr key={`${it.nama}-${i}`} className="hover:bg-slate-50/60">
-                    <td className="px-3 py-2 text-slate-400 tabular-nums">{i + 1}</td>
+                    <td className="px-3 py-2 text-slate-500 tabular-nums">{i + 1}</td>
                     <td className="px-3 py-2 text-slate-800">{it.nama}</td>
                     <td className="px-3 py-2 text-slate-500 text-xs">{it.satuan}</td>
                     <td className="px-3 py-2 text-right font-semibold text-slate-900 tabular-nums whitespace-nowrap">
@@ -204,7 +204,7 @@ export const MarketPriceTable: React.FC<{ sumber?: string; badge?: string; title
           </div>
         )}
         {!loading && !error && data && data.daftar.length > 0 && (
-          <p className="text-[11px] text-slate-400 mt-2">
+          <p className="text-[11px] text-slate-500 mt-2">
             Menampilkan {rows.length} dari {data.daftar.length} komoditas - Sumber: {data.sumber}
           </p>
         )}
