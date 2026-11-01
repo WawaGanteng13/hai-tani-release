@@ -115,7 +115,7 @@ Farmers: log every unburned residue, every kilogram of fertilizer saved, every t
 
 ## Revenue Streams
 
-Freemium plus commission: free core with 5% deal commission; Tumbuh Rp25rb/mo at 2%; Panen Rp75rb/mo at 0% with full records and analytics. At 10k farmers the model yields ~Rp7.46B/year, commission-dominated and benchmarked inside Shopee/Tokopedia 1-8% norms. Full tiers, math, and verification: [docs/revenue-streams.md](docs/revenue-streams.md).
+Freemium plus commission: free core with 5% deal commission; Tumbuh Rp25rb/mo at 2%; Panen Rp75rb/mo at 0% with full records and analytics. At 10k farmers the model yields ~Rp7.46B/year, commission-dominated and benchmarked inside Shopee/Tokopedia 1-8% norms. Full tiers, math, and verification: [docs/revenue-streams.md](docs/revenue-streams.md). Underlying costs and burn vs revenue: [docs/cost-structure.md](docs/cost-structure.md).
 
 ## Business Flow
 
