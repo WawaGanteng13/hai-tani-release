@@ -1,0 +1,60 @@
+# Hai Tani Revenue Streams: Freemium + Commission
+
+Model: core features free; paid tiers cut commission and unlock deeper records and advice. All figures in Rupiah; M = miliar (billion), jt = juta (million).
+
+## Tiers (proposal)
+
+| | Tunas (Free) | Tumbuh Rp25rb/bln (Rp250rb/thn) | Panen Rp75rb/bln (Rp750rb/thn) |
+|---|---|---|---|
+| Chat + market prices | Yes | Yes | Yes |
+| Plots recorded | 1 | Unlimited | Unlimited + poktan multi-user (5) |
+| Buyer matchmaking | Yes, 5% commission | Yes, 2% commission | Yes, 0% commission |
+| Records | Basic | Full + export | Full + analytics + forecast |
+| Crop clinic + fertilizer dosing | No | Yes | Yes, priority |
+| QR card | No | Yes | Yes |
+| Carbon-record ready | No | No | Yes |
+
+Buyer seat "Mitra" Rp150rb/bln (sourcing analytics, verified directory) - optional 4th tier, excluded from math below.
+
+## Basis numbers (explicit assumptions)
+
+- Average deal: 500 kg x Rp15.000 = Rp7.5jt. Assumption, conservative for vegetables.
+- Farmer net: Rp1.8jt/ha/season (prior research) ~ Rp300rb/mo/ha over 6 months.
+- Paid conversion: 5% of farmers (4:1 Plus:Pro). Industry freemium rule of thumb 2-5%; treated as assumption, sensitivity below.
+- Deals per farmer per year: 2. Assumption.
+
+## Calculation A: commission per deal
+
+- Free: 5% x Rp7.5jt = Rp375rb. Plus: 2% = Rp150rb. Pro: Rp0.
+- Plus saves Rp225rb/deal vs Free - monthly fee Rp25rb pays back in 0.11 deals; annual Rp250rb in 1.1 deals/year.
+- Pro annual Rp750rb breaks even vs Free at 2 deals/year.
+
+## Calculation B: affordability check
+
+- Rp25rb/mo vs ~Rp300rb/mo/ha net = 8.3% of monthly net per hectare. Honest flag: meaningful for 1-ha farmers, which is why one deal covers 9 months of subscription. Pricing must stay here, not higher.
+
+## Calculation C: scale scenarios (10k farmers)
+
+- GMV = 10.000 x 2 x Rp7.5jt = Rp150B.
+- Blended commission = 0.95x5 + 0.04x2 + 0.01x0 = 4.83% -> Rp7.25B/year.
+- Subscriptions = 400 x Rp300rb + 100 x Rp900rb = Rp210jt/year.
+- Total ~ Rp7.46B/year. Commission dominates 35:1 - subscriptions are loyalty, commission is the engine.
+- Leakage haircut (cash deals off-platform, mitigated by escrow): -30% commission -> total ~Rp5.29B.
+- Linear scale: 1k farmers ~Rp746M; 100k ~Rp74.6B (diseconomies ignored).
+- Half conversion (2.5%): subs Rp105jt, commission Rp7.31B - total barely moves.
+
+## Verification
+
+| Claim | Check | Status |
+|---|---|---|
+| 5%/2%/0% fair | Shopee 1-6%, Tokopedia 2-6.5% basic-seller range (COSTING journal 2026; id-marketplace-tools); Shopee Mall to 6%; campaign all-in to 30% | PASS - inside market norms |
+| Subscription affordable | 8.3% of monthly net/ha; 1 deal covers 9 months | PASS with flag |
+| Conversion realistic | 2-5% rule of thumb; model works at half | PASS - insensitive |
+| Consistent with SOM doc | SOM subs-only Rp21-189M at 210k+ farmers; this model adds commission engine explicitly excluded there | PASS - reconciled |
+| Tax cost | PMK 37/2025: marketplaces withhold PPh 22 0.5% of turnover | NOTED as cost |
+| No lending risk | No P2P (TaniFund lesson, see business-flow.md) | PASS by design |
+
+## Live today vs roadmap
+
+- Live: negotiation spread to kas (variable), affiliate 3% (AFFILIATE_PCT in code).
+- Roadmap: tier enforcement (F9), subscription billing, escrow-via-bank (see business-flow.md), Mitra buyer seats.

@@ -113,6 +113,10 @@ Hai Tani's farm activity logs are built to become carbon value. This is our hope
 
 Farmers: log every unburned residue, every kilogram of fertilizer saved, every tree planted. Full intent, architecture, and data-gap plan: [docs/carbon-roadmap.md](docs/carbon-roadmap.md).
 
+## Revenue Streams
+
+Freemium plus commission: free core with 5% deal commission; Tumbuh Rp25rb/mo at 2%; Panen Rp75rb/mo at 0% with full records and analytics. At 10k farmers the model yields ~Rp7.46B/year, commission-dominated and benchmarked inside Shopee/Tokopedia 1-8% norms. Full tiers, math, and verification: [docs/revenue-streams.md](docs/revenue-streams.md).
+
 ## Business Flow
 
 Hai Tani sits in the middle of six parties — farmers, buyers, agri shops, government, banks, universities - connecting both sides, keeping farm records, and orchestrating deals through a licensed partner escrow (Hai Tani never holds funds: escrow needs an OJK license). Full ecosystem map and money flow: [docs/business-flow.md](docs/business-flow.md).
