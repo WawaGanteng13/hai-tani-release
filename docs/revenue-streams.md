@@ -23,9 +23,14 @@ Buyer seat "Mitra" Rp150rb/bln (sourcing analytics, verified directory) - option
 - Paid conversion: 5% of farmers (4:1 Plus:Pro). Industry freemium rule of thumb 2-5%; treated as assumption, sensitivity below.
 - Deals per farmer per year: 2. Assumption.
 
+## Revenue engine: agentic 2-way negotiation (live in code)
+
+Commission here is not a passive fee — it is the spread the negotiation agent creates. The bot collects the buyer budget on one side and each farmer ask on the other (`evalOffer`: spread = alokasiKg x (budget - farmerPrice)); at deal time Hai Tani takes at most the tier cap and returns the remainder to the farmer via price top-up (`finalizeOfferDeal`: take = min(spread, tier% x dealValue), server.ts). Better bargaining = bigger spread = more revenue, while the farmer always keeps budget-minus-capped-commission. The better the agent negotiates for BOTH sides, the more it earns.
+
 ## Calculation A: commission per deal
 
 - Free: 5% x Rp7.5jt = Rp375rb. Plus: 2% = Rp150rb. Pro: Rp0.
+- Simplification note: the math below assumes negotiated spread covers the tier cap. When spread is thinner, Hai Tani takes only the spread (code: min(spread, tier%)) — the agent must bargain well to earn well.
 - Plus saves Rp225rb/deal vs Free - monthly fee Rp25rb pays back in 0.11 deals; annual Rp250rb in 1.1 deals/year.
 - Pro annual Rp750rb breaks even vs Free at 2 deals/year.
 

@@ -13,7 +13,7 @@ Hai Tani (TaniAI) is a WhatsApp-first agentic marketplace for Indonesian smallho
 68% of Indonesian farmers sell through the same middlemen, harvests bought cheap at the farm gate while traders control market selling. Farmers keep razor-thin margins and have no direct buyer access.
 
 ## Solution (agentic, not a chatbot)
-- Stateful buyer↔farmer negotiation over WhatsApp: demands, budgets, farmer quotes, spec verification (`sanggup`/`tidak`), allocation, deal, tiered commission (5/2/0%).
+- Stateful buyer↔farmer negotiation over WhatsApp: demands, budgets, farmer quotes, spec verification (`sanggup`/`tidak`), allocation, deal — the 2-way bargaining creates the price spread that funds Hai Tani via a tiered take (5/2/0%), with the remainder returned to the farmer.
 - Verified farmer directory + spatial map, live SISKAPERBAPO/Mantung/InfoPangan prices, auto anomaly detection with admin broadcast.
 - Supporting agent tools (not the headline): photo diagnosis loop (vision → verified-reference match → clarifying question → saved case), grounded agronomy Q&A with [REF-xxx] citations + PPL escalation, ERP logging, QR registration cards, Sheets two-way sync.
 
