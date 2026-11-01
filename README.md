@@ -107,9 +107,9 @@ Note: actual adoption (registered farmers/buyers, negotiation volume) has no dat
 - 3-5 year SOM (Java-Sumatra, horticulture): assumed 1-3% share of SAM → Rp21-189M/year (subscription). Benchmark: Sayurbox ~1M customers, >10,000 partner farmers, $120M Series C — https://startuprise.org/agritech-startups-of-indonesia-2024/
 - Full figures + assumptions: [docs/market-TOM-SAM-SOM.md](docs/market-TOM-SAM-SOM.md).
 
-## Carbon Roadmap
+## Carbon Roadmap (next goal)
 
-Hai Tani's farm activity logs are built to become carbon value. Verified landscape: IDXCarbon (~1.98M tCO2e / Rp93.81B through June 2026), mandatory SRN PPI registry, and Agriculture Regulation 18/2026 opening rice/livestock/plantation credits with mandatory farmer benefit-sharing. Hai Tani positions as the MRV data pipeline feeding aggregators (e.g. Fairatmos) and standards (Verra / Gold Standard / Plan Vivo) — profit shared with farmers.
+Hai Tani's farm activity logs are built to become carbon value. This is our hope and next goal — not live yet. Verified landscape: IDXCarbon (~1.98M tCO2e / Rp93.81B through June 2026), mandatory SRN PPI registry, and Agriculture Regulation 18/2026 opening rice/livestock/plantation credits with mandatory farmer benefit-sharing. Hai Tani positions as the MRV data pipeline feeding aggregators (e.g. Fairatmos) and standards (Verra / Gold Standard / Plan Vivo) — profit shared with farmers.
 
 Farmers: log every unburned residue, every kilogram of fertilizer saved, every tree planted. Full intent, architecture, and data-gap plan: [docs/carbon-roadmap.md](docs/carbon-roadmap.md).
 
@@ -148,6 +148,10 @@ Server: http://127.0.0.1:3000 (default `PORT` when the env is unset; see server.
 - [Functional test recap 100/100](docs/fase3/01-rekap-uji-fungsional.md)
 - [Stress test 104 rps, 0 failures](docs/fase3/02-uji-stres.md)
 - [WCAG accessibility pre-audit](docs/fase3/03-aksesibilitas-wcag.md)
+
+## Data & Status (MVP)
+
+Hai Tani is an MVP in active development. The farm database is a mix of mock data and selected real farmer data used for building and testing. Carbon-credit integration above is a stated next goal, not a live feature.
 
 ## License
 

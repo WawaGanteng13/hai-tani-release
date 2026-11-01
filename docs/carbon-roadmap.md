@@ -42,4 +42,4 @@ Farmers: every unburned harvest residue, every kilogram of chemical fertilizer r
 
 ## Status
 
-Research + intent (this doc). Code integration starts when a partner API contract exists (no speculative endpoints). Next code steps when contracted: polygon capture, practice tagging on activity logs, poktan entities, MRV export endpoint.
+Harapan / next goal (this doc): research + intent only, not live. Hai Tani is an MVP; its farm database mixes mock data with selected real farmer data for development. Code integration starts when a partner API contract exists (no speculative endpoints). Next code steps when contracted: polygon capture, practice tagging on activity logs, poktan entities, MRV export endpoint.
