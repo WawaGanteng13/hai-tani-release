@@ -101,7 +101,21 @@ export const GoogleDriveSheetsConnector: React.FC<GoogleDriveSheetsConnectorProp
       }
     } catch (err: any) {
       console.error('Login error:', err);
-      setErrorMsg(err?.message || 'Gagal masuk dengan Google.');
+      const code = String(err?.code || '');
+      if (code === 'auth/unauthorized-domain') {
+        const host = window.location.hostname;
+        setErrorMsg(
+          `Domain ${host} belum terdaftar di Firebase (Authorized domains). ` +
+          `Buka dasbor via http://127.0.0.1:3000 agar login Google jalan, ` +
+          `atau daftarkan domain ini di Firebase Console → Authentication → Settings → Authorized domains.`
+        );
+      } else if (code === 'auth/popup-blocked') {
+        setErrorMsg('Popup login diblokir browser. Izinkan popup untuk situs ini lalu coba lagi.');
+      } else if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        setErrorMsg('Login dibatalkan. Klik "Login dengan Akun Google" untuk mencoba lagi.');
+      } else {
+        setErrorMsg(err?.message || 'Gagal masuk dengan Google.');
+      }
     } finally {
       setIsLoggingIn(false);
     }
