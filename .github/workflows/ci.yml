@@ -13,6 +13,7 @@ env:
   SMOKE_PORT: "3101"
   BASE_URL: http://127.0.0.1:3101
   DISABLE_LAYA_SIDECAR: "true"
+  DISABLE_WA_OUTBOUND: "true"
 
 jobs:
   static:
@@ -95,6 +96,11 @@ jobs:
         env:
           FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
         run: node docs/fase3/router-shadow-gate.js "$BASE_URL"
+
+      - name: BLOCKING live gate - order-notify (petani dikabari order)
+        env:
+          FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
+        run: node docs/fase3/order-notify-gate.js "$BASE_URL"
 
       - name: "INFORMATIONAL - stress (reduced: 25rps x 10s, never gates)"
         env:

@@ -1491,6 +1491,47 @@ async function broadcastWaTemplate(targets: { nama: string; noHp: string }[], te
   return out;
 }
 
+// Notifikasi order baru ke petani (OFR-047: Annisa->Joji tanpa kabar). Proaktif,
+// 1x per (offer, farmer). Dalam jendela 24 jam Meta -> teks bebas; di luar itu
+// -> template opener (teks bebas ditolak 131047), detail menyusul saat petani
+// chat (digest nudge). DISABLE_WA_OUTBOUND=true: tanpa HTTP, cabang + dedupe
+// tetap dihitung agar teruji gate.
+async function notifyFarmersNewOrder(o: Offer): Promise<void> {
+  if (!o || o.status === "DEAL" || o.status === "BATAL") return;
+  const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+  const { token } = waOutboundConfig();
+  if (!dry && !token) { console.log(`[Notify] ${o.id}: tanpa token, lewati`); return; }
+  const sent = new Set(o.notifiedFarmerIds || []);
+  let changed = false;
+  for (const l of o.lines) {
+    if (Number(l.hargaPetaniPerKg) || sent.has(l.farmerId)) continue;
+    const f = farmersDb.find((x) => x.id === l.farmerId);
+    if (!f || !f.noHp) continue;
+    const u = usersDb.find((x) => normalizePhone(x.phone) === normalizePhone(f.noHp));
+    if (u && u.status === "BLOCKED") continue;
+    const lastIn = u && u.lastInboundAt ? Date.parse(u.lastInboundAt) : 0;
+    const inWindow = !!lastIn && Date.now() - lastIn < 24 * 3600e3;
+    const body = `Pesanan baru ${o.id}: buyer butuh ${o.komoditas} ${fmtKg(Number(o.qtyKg) || 0)}${Number(o.budgetPerKg) ? ` (budget ${fmtRp(Number(o.budgetPerKg))}/kg)` : ""}.${o.spesifikasi ? `\nSpek: ${o.spesifikasi}.` : ""}\nStok Anda tercatat ${fmtKg(Number(l.stokKg) || 0)} — balas harga jual, mis. "jual ${o.komoditas} 8000".`;
+    try {
+      if (dry) {
+        emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { farmerId: l.farmerId, channel: inWindow ? "text" : "template", dry: true } });
+      } else if (inWindow) {
+        const r = await sendWaText(f.noHp, body);
+        console.log(`[Notify] ${o.id} -> ${l.farmerId} ${r.ok ? "TERKIRIM" : "GAGAL " + (r.error || "")}`);
+        if (!r.ok) continue;
+        emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { farmerId: l.farmerId, channel: "text" } });
+      } else {
+        const r = await sendWaTemplate(f.noHp, WA_OPENER_TEMPLATE, "id", []);
+        console.log(`[Notify] ${o.id} -> ${l.farmerId} opener ${r.ok ? "TERKIRIM" : "GAGAL " + (r.error || "")}`);
+        if (!r.ok) continue;
+        emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { farmerId: l.farmerId, channel: "template" } });
+      }
+      sent.add(l.farmerId); changed = true;
+    } catch (e: any) { console.log(`[Notify] ${o.id} -> ${l.farmerId} EXC ${String((e && e.message) || e).slice(0, 120)}`); }
+  }
+  if (changed) { o.notifiedFarmerIds = [...sent]; o.updatedAt = new Date().toISOString(); saveOffersToDisk(); }
+}
+
 // Universal Entity Extractor from conversation text / voice note
 function extractFarmerFromText(text: string, currentDraft: Partial<FarmerRecord> = {}): {
   extracted: Partial<FarmerRecord>;
@@ -7280,13 +7321,16 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       if (parts.some((d) => d && typeof d === "object" && Object.keys(d).length > 0)) return;
     } catch { /* lanjut tanpa info draf */ }
     const pick = pickNudgeTarget(farmer.id);
-    if (!pick) return;
+    // Digest order: pesanan OPEN/SEBAGIAN yang menunggu harga petani ini.
+    const myOpenNdg = offersDb.filter((x) => (x.status === "OPEN" || x.status === "SEBAGIAN") && x.lines.some((l) => l.farmerId === farmer.id && !Number(l.hargaPetaniPerKg))).slice(-3);
+    if (!pick && myOpenNdg.length === 0) return;
     const at = new Date().toISOString();
-    body.reply += pick.text;
+    if (pick) body.reply += pick.text;
+    if (myOpenNdg.length > 0) body.reply += `\n\nAda *${myOpenNdg.length} pesanan* menunggu harga Anda:\n` + myOpenNdg.map((x) => `- *${x.id}*: ${x.komoditas} ${fmtKg(Number(x.qtyKg) || 0)}${Number(x.budgetPerKg) ? `, budget ${fmtRp(Number(x.budgetPerKg))}/kg` : ""} — balas "jual ${x.komoditas} <harga>"`).join("\n");
     u.lastNudgeAt = at;
-    u.pendingAsk = { kind: "NUDGE", offerId: "", ts: at, nudge: { komoditasId: pick.kmd.id, field: "harga" } };
+    if (pick) u.pendingAsk = { kind: "NUDGE", offerId: "", ts: at, nudge: { komoditasId: pick.kmd.id, field: "harga" } };
     touchUser(u);
-    console.log(`[Nudge] sodor ${pick.kmd.komoditas} ke ${maskPhone(mePhone)}`);
+    console.log(`[Nudge] sodor ${pick ? pick.kmd.komoditas : "-"} + ${myOpenNdg.length} order ke ${maskPhone(mePhone)}`);
   }
   // Telemetri tier pasif (rencana; TANPA enforcement sampai F9).
   function bumpDailyChats(u: UserRecord): void {
@@ -7296,6 +7340,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       u.dailyChats = 0;
     }
     u.dailyChats = (u.dailyChats || 0) + 1;
+    u.lastInboundAt = new Date().toISOString(); // jendela 24 jam Meta utk notifikasi order
     u.updatedAt = new Date().toISOString();
     saveUsersToDisk();
   }
@@ -8279,6 +8324,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             }
             const ev = evalOffer(reuse);
             saveOffersToDisk();
+            await notifyFarmersNewOrder(reuse).catch(() => {});
             if (!Number(reuse.budgetPerKg) && negoUser) setAsk(negoUser, "BUDGET", reuse.id);
             return nogoReply(`🤝 *${reuse.id} diperbarui:* butuh *${kom}* ${fmtKg(qty)}.\n\n${stockListText(cands, kom, qty)}\n\n` +
               (spekBaru ? `Spek: ${spekBaru}.\n\n` : "") +
@@ -8306,6 +8352,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             action: "create", actor: mePhone,
             payload: { komoditas: kom, qtyKg: qty, kandidat: o.lines.length, ...(spekBaru ? { spesifikasi: spekBaru } : {}) },
           });
+          await notifyFarmersNewOrder(o).catch(() => {});
           if (negoUser) setAsk(negoUser, "BUDGET", o.id);
           return nogoReply(
             `🤝 *Permintaan dicatat: ${o.id}*\nButuh *${kom}* ${fmtKg(qty)}.${spekBaru ? `\nSpek: ${spekBaru}.` : ""}\n\n${stockListText(cands, kom, qty)}\n\n💰 *Budget Anda berapa per kg?* Balas mis. "budget 8000".`,

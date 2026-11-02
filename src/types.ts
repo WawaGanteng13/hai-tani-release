@@ -169,6 +169,8 @@ export interface UserRecord {
   lastNudgeAt?: string;
   nudgeOptOut?: boolean;
   memory?: UserMemory;
+  // Notifikasi order: stempel inbound terakhir (jendela 24 jam Meta).
+  lastInboundAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -223,6 +225,8 @@ export interface Offer {
   spreadTotalRp?: number;
   namaBuyer?: string;
   followupAt?: string;
+  // Notifikasi order: farmerId yang sudah dikabari (1x per offer).
+  notifiedFarmerIds?: string[];
   catatan?: string;
   kasId?: string;
   createdAt: string;
