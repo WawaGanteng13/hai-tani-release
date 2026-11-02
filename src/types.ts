@@ -121,6 +121,18 @@ export type OnboardingState = 'NEW' | 'TOS_SENT' | 'ROLE_ASK' | 'LOC_ASK' | 'DON
 export type UserTier = 'FREE' | 'PAID' | 'TUNAS' | 'TUMBUH' | 'PANEN';
 export type UserStatus = 'ACTIVE' | 'DECLINED' | 'FLAGGED' | 'BLOCKED';
 
+// Memori konsultan agronomi per nomor WA: dibaca tiap chat, ditulis otomatis
+// dari observasi (aktivitas, pola tanam, kondisi lahan/tanaman). Semua opsional.
+export interface UserMemory {
+  farmerIds?: string[];
+  prefs?: { ringkas?: boolean; topik?: string[] };
+  polaTanam?: Array<{ komoditas: string; musimTanam?: string; luasHa?: number; status?: string; updatedAt: string }>;
+  lahan?: { kabupaten?: string; luasHa?: number; kondisi?: string[]; updatedAt?: string };
+  tanaman?: Array<{ komoditas: string; fase?: string; masalah?: string[]; updatedAt: string }>;
+  aktivitas?: Array<{ ts: string; kind: string; ringkas: string }>;
+  lastWelcomeBackAt?: string;
+}
+
 // F1: identitas + onboarding + anti-spam per nomor WA (users_db.json).
 // Field tier = telemetri pasif (rencana; tanpa enforcement sampai F9).
 export interface UserRecord {
@@ -156,6 +168,7 @@ export interface UserRecord {
   // F6 session-maximizer: 1x sodoran/hari + opt-out permanen.
   lastNudgeAt?: string;
   nudgeOptOut?: boolean;
+  memory?: UserMemory;
   createdAt: string;
   updatedAt: string;
 }

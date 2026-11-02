@@ -43,6 +43,7 @@ import {
   ProductRecord,
   ProductKategori,
   AffiliateSale,
+  UserMemory,
 } from "./src/types";
 import { calculateFertilizerRecommendation } from "./src/utils/agronomy";
 import { REFERENSI_PERTANIAN } from "./src/data/referensi_pertanian";
@@ -7193,6 +7194,57 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     saveUsersToDisk();
     return u;
   }
+  // Memori konsultan agronomi: profil dibaca tiap chat, ditulis otomatis.
+  function ensureMemory(u: UserRecord): UserMemory {
+    if (!u.memory) u.memory = {};
+    return u.memory;
+  }
+  function linkFarmerMemory(u: UserRecord): FarmerRecord | undefined {
+    const me = normalizePhone(u.phone);
+    if (!me) return undefined;
+    const f = farmersDb.find((x) => normalizePhone(x.noHp) === me);
+    if (!f) return undefined;
+    const m = ensureMemory(u);
+    const ids = new Set(m.farmerIds || []);
+    ids.add(f.id);
+    m.farmerIds = [...ids];
+    const now = new Date().toISOString();
+    m.lahan = { kabupaten: f.kabupaten || f.alamat || undefined, luasHa: f.luasLahan || undefined, kondisi: m.lahan?.kondisi, updatedAt: now };
+    try {
+      const rows = komoditasDb.filter((k) => k.farmerId === f.id).slice(-5);
+      if (rows.length > 0) m.polaTanam = rows.map((k) => ({ komoditas: k.komoditas, musimTanam: k.musimTanam, luasHa: k.luasHa, status: k.status, updatedAt: now }));
+    } catch {}
+    u.updatedAt = now;
+    saveUsersToDisk();
+    return f;
+  }
+  function logActivity(u: UserRecord, kind: string, ringkas: string): void {
+    const m = ensureMemory(u);
+    const list = m.aktivitas || [];
+    list.unshift({ ts: new Date().toISOString(), kind: String(kind || "chat").slice(0, 24), ringkas: String(ringkas || "").slice(0, 80) });
+    m.aktivitas = list.slice(0, 20);
+    touchUser(u);
+  }
+  function memoryLineFor(u: UserRecord | undefined): string {
+    if (!u) return "";
+    const parts: string[] = [];
+    const m = u.memory;
+    const f = farmersDb.find((x) => normalizePhone(x.noHp) === normalizePhone(u.phone));
+    if (f) parts.push(`petani ${f.nama} (${f.id}): ${f.komoditas || "-"}${f.luasLahan ? ` ${f.luasLahan}Ha` : ""}${f.kabupaten ? ` ${f.kabupaten}` : ""}`);
+    if (m?.polaTanam?.length) parts.push(`pola tanam: ${m.polaTanam.map((p) => `${p.komoditas}${p.musimTanam ? ` ${p.musimTanam}` : ""} (${p.status || "?"})`).join("; ")}`);
+    try {
+      const dg = readJsonSafe<any[]>(DIAGNOSA_FILE, [], "diagnosa_db.json");
+      const mine = (Array.isArray(dg) ? dg : []).find((d) => f && d?.farmerId === f.id);
+      if (mine?.ringkasan) parts.push(`kasus tanaman terakhir ${mine.id}: ${String(mine.ringkasan).slice(0, 120)}`);
+    } catch {}
+    if (m?.aktivitas?.length) {
+      const kinds: Record<string, number> = {};
+      m.aktivitas.forEach((a) => { kinds[a.kind] = (kinds[a.kind] || 0) + 1; });
+      parts.push(`aktivitas: ${Object.entries(kinds).map(([k, n]) => `${k} ${n}x`).join(", ")}`);
+    }
+    if (parts.length === 0) return "";
+    return `[PROFIL USER — rujuk seperlunya, jangan tempel mentah: ${parts.join(" | ")}]`;
+  }
   function touchUser(u: UserRecord): void {
     u.updatedAt = new Date().toISOString();
     saveUsersToDisk();
@@ -7393,6 +7445,19 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       return { reply: "", quickReplies: [], extracted: {}, isComplete: true, isAdminAction: false, aiProvider: "rule_based" };
     }
     if (user.onboardingState === "DONE" || user.onboardingState === "DONE_WEAK") return null;
+    // Rekognisi: nomor terdaftar di database petani langsung disapa nama —
+    // tanpa diminta lengkapi data. SETUJU tetap wajib (gate TOS).
+    if (user.onboardingState !== "DECLINED" && !user.memory?.lastWelcomeBackAt) {
+      const legacy = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(user.phone));
+      if (legacy) {
+        linkFarmerMemory(user);
+        ensureMemory(user).lastWelcomeBackAt = new Date().toISOString();
+        user.onboardingState = "TOS_SENT";
+        user.onboardingTries = 0;
+        touchUser(user);
+        return { reply: `👋 Selamat datang kembali, *${legacy.nama}*!\nNomor ini terdaftar sebagai petani (${legacy.komoditas || "-"}${legacy.luasLahan ? `, ${legacy.luasLahan} Ha` : ""}${legacy.kabupaten ? `, ${legacy.kabupaten}` : ""}).\n\nBalas *SETUJU* untuk lanjut ke layanan penuh.`, quickReplies: ["SETUJU"], extracted: {}, isComplete: false, isAdminAction: false, aiProvider: "rule_based" };
+      }
+    }
     if (user.onboardingState === "DECLINED") {
       if (/\bsetuju\b/.test(lower) && !/tidak setuju|gak setuju|nggak setuju/.test(lower)) {
         user.tosVersion = TOS_VERSION;
@@ -7567,6 +7632,14 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             ms: Date.now() - chatT0, intent: loggedIntent,
             ok: !body?.error, err: body?.error ? clipText(body.error, 200) : undefined,
           });
+        } catch {}
+        try {
+          // Memori otomatis: tiap chat WA dicatat ke profil user + tautkan petani.
+          const mu = getUser(String(senderPhone || ""));
+          if (mu) {
+            linkFarmerMemory(mu);
+            logActivity(mu, String(loggedIntent || (body as any)?.aiProvider || "chat"), String(message || ""));
+          }
         } catch {}
         return out;
       }) as any;
@@ -8801,10 +8874,13 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     }
 
     // 0a. Agronomy Fertilizer Calculator query intent (accessible for both Farmers and Admins)
-    const fertResult = handleAgronomyFertilizerQuery(message, currentDraft || {});
+    const fertFarmer = !isAdmin ? farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(String(effPhone || senderPhone || ""))) : undefined;
+    const fertDraft = fertFarmer ? { komoditas: fertFarmer.komoditas, luasLahan: fertFarmer.luasLahan, ...(currentDraft || {}) } : (currentDraft || {});
+    const fertResult = handleAgronomyFertilizerQuery(message, fertDraft);
     if (fertResult) {
+      const fertMem = fertFarmer ? `📌 Mengingat lahan Bpk/Ibu *${fertFarmer.nama}* (${fertFarmer.komoditas || "-"}${fertFarmer.luasLahan ? `, ${fertFarmer.luasLahan} Ha` : ""}${fertFarmer.kabupaten ? `, ${fertFarmer.kabupaten}` : ""}).\n\n` : "";
       return res.json({
-        reply: fertResult.reply,
+        reply: fertMem + fertResult.reply,
         quickReplies: fertResult.quickReplies,
         extracted: currentDraft || {},
         isComplete: false,
@@ -9382,7 +9458,8 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         console.log("[Petani Chat] bypass LLM: data/pendaftaran petani -> deterministik.");
       } else if (!sessAdm && fwdOk && waOutboundConfig().token) {
         // F5: WA berpacu — ack <8 dtk, jawaban asli susulan langsung.
-        const p = callUniversalAI(systemInstructions, message, history, { maxOutputTokens: 550, timeoutMs: ACK_BG_CAP_MS });
+        const memSysF = memoryLineFor(getUser(String(effPhone || senderPhone || "")));
+        const p = callUniversalAI(memSysF ? systemInstructions + "\n\n" + memSysF : systemInstructions, message, history, { maxOutputTokens: 550, timeoutMs: ACK_BG_CAP_MS });
         // Deadline ack dari request masuk (lihat cabang admin).
         const ackWaitMs = Math.max(500, ACK_AFTER_MS - (Date.now() - chatT0));
         if (Date.now() - chatT0 > 1500) console.log(`[Ack] pra-race lambat ${Date.now() - chatT0}ms :: ${String(message || "").slice(0, 60)}`);
