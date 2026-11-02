@@ -29,7 +29,7 @@ import {
   X,
   Loader2,
 } from 'lucide-react';
-import { api } from '../api';
+import { api, apiUrl } from '../api';
 import { FarmerRecord, SupplierRecord, AdminUser } from '../types';
 import { GoogleSheetsOnlineModal } from './GoogleSheetsOnlineModal';
 import { GoogleDriveSheetsConnector } from './GoogleDriveSheetsConnector';
@@ -197,9 +197,8 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
   const getFormula = (type: 'farmers' | 'suppliers') => {
-    const origin = typeof window !== 'undefined' ? window.location.origin : '';
-    const path = type === 'farmers' ? '/api/sheets/export.csv' : '/api/sheets/suppliers/export.csv';
-    return `=IMPORTDATA("${origin}${path}")`;
+    const suffix = type === 'farmers' ? 'export.csv' : 'suppliers/export.csv';
+    return `=IMPORTDATA("${apiUrl(`/api/sheets/${suffix}`)}")`;
   };
 
   const handleCopyFormula = (type: 'farmers' | 'suppliers') => {
@@ -250,14 +249,14 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
 
   const handleExportCSV = () => {
     if (activeTab === 'farmers') {
-      window.open('/api/sheets/export.csv', '_blank');
+      window.open(apiUrl('/api/sheets/export.csv'), '_blank');
     } else {
-      window.open('/api/sheets/suppliers/export.csv', '_blank');
+      window.open(apiUrl('/api/sheets/suppliers/export.csv'), '_blank');
     }
   };
 
   const handleOpenLiveWebSheets = () => {
-    window.open('/api/sheets/live-view', '_blank');
+    window.open(apiUrl('/api/sheets/live-view'), '_blank');
   };
 
   const handleOpenGoogleSheets = () => {
@@ -459,7 +458,7 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
                   </p>
                   <div className="flex items-center space-x-1.5 pt-1">
                     <a
-                      href="/api/sheets/export.csv"
+                      href={apiUrl('/api/sheets/export.csv')}
                       download
                       className="flex-1 px-2 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-semibold rounded-lg flex items-center justify-center space-x-1 border border-slate-300 transition cursor-pointer"
                     >
@@ -467,7 +466,7 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
                       <span>CSV Petani</span>
                     </a>
                     <a
-                      href="/api/sheets/suppliers/export.csv"
+                      href={apiUrl('/api/sheets/suppliers/export.csv')}
                       download
                       className="flex-1 px-2 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-semibold rounded-lg flex items-center justify-center space-x-1 border border-slate-300 transition cursor-pointer"
                     >
@@ -659,7 +658,7 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
                             </a>
                           )}
                           <a
-                            href={`/api/kartu/${encodeURIComponent(f.id)}`}
+                            href={apiUrl(`/api/kartu/${encodeURIComponent(f.id)}`)}
                             target="_blank"
                             rel="noreferrer"
                             className="text-slate-400 hover:text-emerald-600 p-1 rounded transition"

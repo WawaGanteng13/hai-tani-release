@@ -1,5 +1,6 @@
 import React from 'react';
 import { ExternalLink, Download } from 'lucide-react';
+import { apiUrl } from '../api';
 
 interface Props {
   text: string;
@@ -68,7 +69,7 @@ function formatLine(line: string): React.ReactNode[] {
       parts.push(
         <a
           key={match.index}
-          href="/api/sheets/export.csv"
+          href={apiUrl('/api/sheets/export.csv')}
           download
           className="inline-flex items-center space-x-1 font-semibold text-emerald-800 hover:text-emerald-950 bg-emerald-100/90 hover:bg-emerald-200 px-2 py-0.5 rounded border border-emerald-300 transition text-xs mx-1"
         >
@@ -80,7 +81,7 @@ function formatLine(line: string): React.ReactNode[] {
       parts.push(
         <a
           key={match.index}
-          href="/api/sheets/live-view"
+          href={apiUrl('/api/sheets/live-view')}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center space-x-1 font-semibold text-sky-800 hover:text-sky-950 bg-sky-100/90 hover:bg-sky-200 px-2 py-0.5 rounded border border-sky-300 transition text-xs mx-1"

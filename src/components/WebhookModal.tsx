@@ -13,7 +13,7 @@ import {
   Zap,
   RefreshCw,
 } from 'lucide-react';
-import { api } from '../api';
+import { api, apiUrl } from '../api';
 
 interface WebhookModalProps {
   isOpen: boolean;
@@ -36,8 +36,8 @@ export const WebhookModal: React.FC<WebhookModalProps> = ({ isOpen, onClose }) =
   const [loadingLogs, setLoadingLogs] = useState(false);
 
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://your-domain.com';
-  const sheetsWebhookUrl = `${currentOrigin}/api/webhook`;
-  const whatsappWebhookUrl = `${currentOrigin}/api/webhook/whatsapp`;
+  const sheetsWebhookUrl = apiUrl('/api/webhook');
+  const whatsappWebhookUrl = `${currentOrigin}/api/webhook/whatsapp`; // SAME-ORIGIN-OK: Meta menembak forwarder di origin Vercel ini
   const verifyToken = 'tani_ai_webhook_verify_token';
 
   const appsScriptCode = `/**

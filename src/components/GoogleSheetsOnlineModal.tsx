@@ -15,6 +15,7 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import { FarmerRecord } from '../types';
+import { apiUrl } from '../api';
 
 interface GoogleSheetsOnlineModalProps {
   isOpen: boolean;
@@ -95,12 +96,11 @@ export const GoogleSheetsOnlineModal: React.FC<GoogleSheetsOnlineModalProps> = (
   };
 
   const handleOpenLiveWebSheets = () => {
-    window.open('/api/sheets/live-view', '_blank');
+    window.open(apiUrl('/api/sheets/live-view'), '_blank');
   };
 
   const handleCopyImportFormula = () => {
-    const origin = window.location.origin;
-    const formula = `=IMPORTDATA("${origin}/api/sheets/export.csv")`;
+    const formula = `=IMPORTDATA("${apiUrl('/api/sheets/export.csv')}")`;
     navigator.clipboard.writeText(formula);
     setNoticeMessage(`✅ Rumus Live Sync berhasil disalin: ${formula} — Tempelkan di sel A1 Google Sheets.`);
     setTimeout(() => setNoticeMessage(null), 5000);
@@ -108,8 +108,7 @@ export const GoogleSheetsOnlineModal: React.FC<GoogleSheetsOnlineModalProps> = (
 
   const handleOpenDocsGoogle = () => {
     handleCopyTSV();
-    const origin = window.location.origin;
-    const formula = `=IMPORTDATA("${origin}/api/sheets/export.csv")`;
+    const formula = `=IMPORTDATA("${apiUrl('/api/sheets/export.csv')}")`;
     setNoticeMessage(
       `🌐 Membuka Google Sheets baru... Data sudah di clipboard (Ctrl+V di sel A1) atau gunakan rumus: ${formula}`
     );
@@ -169,7 +168,7 @@ export const GoogleSheetsOnlineModal: React.FC<GoogleSheetsOnlineModalProps> = (
             </button>
 
             <a
-              href="/api/sheets/export.csv"
+              href={apiUrl('/api/sheets/export.csv')}
               download
               className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition cursor-pointer"
             >

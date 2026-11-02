@@ -7,6 +7,7 @@ import {
   SearchX,
   Database,
 } from 'lucide-react';
+import { api } from '../api';
 
 interface HargaPasarItem {
   nama: string;
@@ -43,7 +44,7 @@ export const MarketPriceTable: React.FC<{ sumber?: string; badge?: string; title
       setError(null);
     }
     try {
-      const res = await fetch(sumber ? `/api/harga-pasar?sumber=${encodeURIComponent(sumber)}` : '/api/harga-pasar');
+      const res = await api(sumber ? `/api/harga-pasar?sumber=${encodeURIComponent(sumber)}` : '/api/harga-pasar');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json: HargaPasarResponse = await res.json();
       setData(json);
