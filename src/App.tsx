@@ -13,6 +13,7 @@ import { DataScientistPortal } from './components/DataScientistPortal';
 import { FarmerSupplierMapView } from './components/FarmerSupplierMapView';
 import { WebhookModal } from './components/WebhookModal';
 import { AddFarmerModal } from './components/AddFarmerModal';
+import { api } from './api';
 import { AddSupplierModal } from './components/AddSupplierModal';
 import { AdminManagerModal } from './components/AdminManagerModal';
 import { LayaModal } from './components/LayaModal';
@@ -76,7 +77,7 @@ function AdminApp() {
     setLoginBusy(true);
     setLoginError('');
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await api('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ noHp: loginNoHp, password: loginPassword }),
@@ -95,14 +96,14 @@ function AdminApp() {
   };
 
   const handleLogout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
     setMe(null);
   };
 
   const fetchLayaStatus = async () => {
     setLayaLoading(true);
     try {
-      const res = await fetch('/api/laya/status');
+      const res = await api('/api/laya/status');
       if (res.ok) {
         const data = await res.json();
         setLayaStatus(data);
@@ -117,7 +118,7 @@ function AdminApp() {
   // Fetch initial data from server
   const loadData = async () => {
     try {
-      const meRes = await fetch('/api/auth/me');
+      const meRes = await api('/api/auth/me');
       if (!meRes.ok) { setMe(null); setLoading(false); return; }
       setMe(await meRes.json());
     } catch {
@@ -127,17 +128,17 @@ function AdminApp() {
     setLoadError(null);
     try {
       const [fRes, cRes, nRes, rRes, aRes, sRes] = await Promise.all([
-        fetch('/api/farmers'),
-        fetch('/api/commodities'),
-        fetch('/api/notifications'),
-        fetch('/api/strategic-recommendation'),
-        fetch('/api/admins'),
-        fetch('/api/suppliers'),
+        api('/api/farmers'),
+        api('/api/commodities'),
+        api('/api/notifications'),
+        api('/api/strategic-recommendation'),
+        api('/api/admins'),
+        api('/api/suppliers'),
       ]);
 
       fetchLayaStatus();
       try {
-        const shRes = await fetch('/api/sheets/status');
+        const shRes = await api('/api/sheets/status');
         if (shRes.ok) setSheetsStatus(await shRes.json());
       } catch {
         /* abaikan: indikator ikut status terakhir */
@@ -182,7 +183,7 @@ function AdminApp() {
   // Handle adding admin
   const handleAddAdmin = async (newAdmin: Omit<AdminUser, 'id' | 'waktuTerdaftar'>, requesterNoHp: string) => {
     try {
-      const res = await fetch('/api/admins', {
+      const res = await api('/api/admins', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...newAdmin, requesterNoHp }),
@@ -204,7 +205,7 @@ function AdminApp() {
   // Handle deleting admin
   const handleDeleteAdmin = async (id: string, requesterNoHp: string) => {
     try {
-      const res = await fetch(`/api/admins/${id}`, {
+      const res = await api(`/api/admins/${id}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp }),
@@ -231,7 +232,7 @@ function AdminApp() {
   // Handle manual farmer addition
   const handleAddFarmerManual = async (farmerData: Partial<FarmerRecord>) => {
     try {
-      const res = await fetch('/api/farmers', {
+      const res = await api('/api/farmers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...farmerData, requesterNoHp: operatorNoHp() }),
@@ -250,7 +251,7 @@ function AdminApp() {
   // Handle farmer delete
   const handleDeleteFarmer = async (id: string) => {
     try {
-      await fetch(`/api/farmers/${id}`, {
+      await api(`/api/farmers/${id}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp: operatorNoHp() }),
@@ -271,7 +272,7 @@ function AdminApp() {
   // Handle manual supplier addition
   const handleAddSupplierManual = async (supplierData: Partial<SupplierRecord>) => {
     try {
-      const res = await fetch('/api/suppliers', {
+      const res = await api('/api/suppliers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...supplierData, requesterNoHp: operatorNoHp() }),
@@ -290,7 +291,7 @@ function AdminApp() {
   // Handle supplier delete
   const handleDeleteSupplier = async (id: string) => {
     try {
-      await fetch(`/api/suppliers/${id}`, {
+      await api(`/api/suppliers/${id}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp: operatorNoHp() }),
@@ -305,7 +306,7 @@ function AdminApp() {
   // Handle price update / anomaly trigger
   const handleUpdateCommodityPrice = async (id: string, newPrice: number, reason: string) => {
     try {
-      const res = await fetch('/api/commodities/update', {
+      const res = await api('/api/commodities/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, hargaBaru: newPrice, penyebab: reason, requesterNoHp: operatorNoHp() }),
@@ -327,7 +328,7 @@ function AdminApp() {
   // Handle broadcast notification
   const handleBroadcastNotification = async (commodityId: string) => {
     try {
-      const res = await fetch('/api/notifications/broadcast', {
+      const res = await api('/api/notifications/broadcast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ komoditasId: commodityId, requesterNoHp: operatorNoHp() }),
@@ -346,7 +347,7 @@ function AdminApp() {
   const handleGenerateRecommendation = async () => {
     setAiGenerating(true);
     try {
-      const res = await fetch('/api/strategic-recommendation/generate', { method: 'POST' });
+      const res = await api('/api/strategic-recommendation/generate', { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         setRecommendation(data);

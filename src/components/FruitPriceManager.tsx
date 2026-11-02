@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Apple, Plus, Trash2 } from 'lucide-react';
 import { FruitPrice } from '../types';
+import { api } from '../api';
 
 export const FruitPriceManager: React.FC = () => {
   const [rows, setRows] = useState<FruitPrice[]>([]);
@@ -14,12 +15,12 @@ export const FruitPriceManager: React.FC = () => {
 
   const load = useCallback(async () => {
     try {
-      const meRes = await fetch('/api/auth/me');
+      const meRes = await api('/api/auth/me');
       if (meRes.ok) {
         const me = await meRes.json();
         setMePhone(me?.noHp || '');
       }
-      const res = await fetch('/api/fruit-prices');
+      const res = await api('/api/fruit-prices');
       if (res.ok) setRows(await res.json());
     } catch {
       /* abaikan: panel ikut render kosong */
@@ -35,7 +36,7 @@ export const FruitPriceManager: React.FC = () => {
     setBusy(true);
     setMsg(null);
     try {
-      const res = await fetch('/api/fruit-prices', {
+      const res = await api('/api/fruit-prices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp: mePhone, nama, satuan, harga: Number(harga), pasar }),
@@ -57,7 +58,7 @@ export const FruitPriceManager: React.FC = () => {
   const del = async (id: string) => {
     setMsg(null);
     try {
-      const res = await fetch(`/api/fruit-prices/${encodeURIComponent(id)}`, {
+      const res = await api(`/api/fruit-prices/${encodeURIComponent(id)}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp: mePhone }),

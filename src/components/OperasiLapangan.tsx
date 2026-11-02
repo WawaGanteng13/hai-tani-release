@@ -13,6 +13,7 @@ import {
   Info,
 } from 'lucide-react';
 import { FarmerRecord } from '../types';
+import { api } from '../api';
 import type { AgronomyRecommendationResult } from '../utils/agronomy';
 
 const BULAN: Record<string, number> = {
@@ -117,7 +118,7 @@ const KlinikTanaman: React.FC<{ crops: string[]; onUjiChat?: () => void }> = ({ 
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/agronomy/fertilizer?crop=${encodeURIComponent(crop)}&ha=${encodeURIComponent(ha)}`);
+      const res = await api(`/api/agronomy/fertilizer?crop=${encodeURIComponent(crop)}&ha=${encodeURIComponent(ha)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setHasil(await res.json());
     } catch (e) {
@@ -215,7 +216,7 @@ const ArusAktivitas: React.FC = () => {
   const load = async () => {
     setError(null);
     try {
-      const res = await fetch('/api/aktivitas');
+      const res = await api('/api/aktivitas');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setItems(await res.json());
     } catch (e) {

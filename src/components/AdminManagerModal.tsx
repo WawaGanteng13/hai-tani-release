@@ -13,6 +13,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { AdminUser } from '../types';
+import { api } from '../api';
 
 interface AdminManagerModalProps {
   isOpen: boolean;
@@ -40,7 +41,7 @@ export const AdminManagerModal: React.FC<AdminManagerModalProps> = ({
   const [sessionNoHp, setSessionNoHp] = useState('');
   const [sessionRole, setSessionRole] = useState('');
   React.useEffect(() => {
-    fetch('/api/auth/me')
+    api('/api/auth/me')
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => {
         if (j) { setSessionNoHp(j.noHp || ''); setSessionRole(j.role || ''); }

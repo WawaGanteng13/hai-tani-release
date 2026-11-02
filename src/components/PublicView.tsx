@@ -18,6 +18,7 @@ import {
   Check,
   ArrowRight,
 } from 'lucide-react';
+import { api } from '../api';
 import { MarketPriceTable } from './MarketPriceTable';
 import { FarmerSupplierMapView } from './FarmerSupplierMapView';
 import { FarmerRecord, SupplierRecord } from '../types';
@@ -173,7 +174,7 @@ const PriceTicker: React.FC = () => {
   const [items, setItems] = useState<Array<{ nama: string; harga: number; satuan: string }>>([]);
 
   useEffect(() => {
-    fetch('/api/harga-pasar?sumber=mantung')
+    api('/api/harga-pasar?sumber=mantung')
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => {
         if (j?.daftar?.length) setItems(j.daftar.slice(0, 12));
@@ -212,7 +213,7 @@ export const PublicView: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/publik/ringkas');
+      const res = await api('/api/publik/ringkas');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setData(await res.json());
     } catch (e) {

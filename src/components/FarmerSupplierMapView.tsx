@@ -35,6 +35,7 @@ import {
   Maximize2,
   Info,
 } from 'lucide-react';
+import { api } from '../api';
 import { FarmerRecord, SupplierRecord } from '../types';
 
 interface FarmerSupplierMapViewProps {
@@ -258,7 +259,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
           latitude: parseFloat(newRegLat),
           longitude: parseFloat(newRegLng),
         };
-        await fetch('/api/farmers', {
+        await api('/api/farmers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...payload, requesterNoHp: operatorNoHp }),
@@ -272,7 +273,7 @@ export const FarmerSupplierMapView: React.FC<FarmerSupplierMapViewProps> = ({
           latitude: parseFloat(newRegLat),
           longitude: parseFloat(newRegLng),
         };
-        await fetch('/api/suppliers', {
+        await api('/api/suppliers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...payload, requesterNoHp: operatorNoHp }),

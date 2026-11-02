@@ -10,6 +10,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { FarmerRecord, SupplierRecord, Offer, OfferStatus, FarmerNeed, NeedStatus, NeedKategori } from '../types';
+import { api } from '../api';
 
 function relatif(ts?: string): string {
   if (!ts) return '';
@@ -86,7 +87,7 @@ const PermintaanBuyer: React.FC<{
   const load = async () => {
     setError(null);
     try {
-      const res = await fetch('/api/offers');
+      const res = await api('/api/offers');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setOffers(await res.json());
     } catch (e) {
@@ -108,7 +109,7 @@ const PermintaanBuyer: React.FC<{
   const save = async (o: Offer, followup: boolean) => {
     setSaving(true);
     try {
-      const res = await fetch(`/api/offers/${encodeURIComponent(o.id)}`, {
+      const res = await api(`/api/offers/${encodeURIComponent(o.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp, namaBuyer: nama, catatan, spesifikasi: spek, ...(followup ? { followupAt: 'now' } : {}) }),
@@ -257,7 +258,7 @@ const KebutuhanPetani: React.FC<Props> = ({ farmers, suppliers, requesterNoHp, o
   const load = async () => {
     setError(null);
     try {
-      const res = await fetch('/api/farmer-needs');
+      const res = await api('/api/farmer-needs');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setNeeds(await res.json());
     } catch (e) {
@@ -283,7 +284,7 @@ const KebutuhanPetani: React.FC<Props> = ({ farmers, suppliers, requesterNoHp, o
     if (!fFarmer || !fItem.trim()) return;
     setSaving(true);
     try {
-      const res = await fetch('/api/farmer-needs', {
+      const res = await api('/api/farmer-needs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp, farmerId: fFarmer, kategori: fKat, item: fItem.trim(), jumlah: fJumlah.trim() || undefined }),
@@ -306,7 +307,7 @@ const KebutuhanPetani: React.FC<Props> = ({ farmers, suppliers, requesterNoHp, o
   const patch = async (n: FarmerNeed, body: Record<string, unknown>, msg: string) => {
     setSaving(true);
     try {
-      const res = await fetch(`/api/farmer-needs/${encodeURIComponent(n.id)}`, {
+      const res = await api(`/api/farmer-needs/${encodeURIComponent(n.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp, ...body }),
@@ -329,7 +330,7 @@ const KebutuhanPetani: React.FC<Props> = ({ farmers, suppliers, requesterNoHp, o
     if (!window.confirm(`Hapus ${n.id} (${n.item})?`)) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/farmer-needs/${encodeURIComponent(n.id)}`, {
+      const res = await api(`/api/farmer-needs/${encodeURIComponent(n.id)}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterNoHp }),

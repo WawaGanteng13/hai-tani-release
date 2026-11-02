@@ -4946,6 +4946,30 @@ export function createServerApp() {
     res.setHeader("Referrer-Policy", "no-referrer");
     next();
   });
+  // CORS untuk frontend Vercel -> backend tunnel. Same-origin lokal tak berubah.
+  app.use((req: any, res, next) => {
+    const origin = String(req.headers?.origin || "");
+    let allowed = false;
+    try {
+      const host = new URL(origin).hostname;
+      const extra = String(process.env.CORS_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
+      allowed = host.endsWith(".vercel.app") || extra.includes(origin) || extra.includes(host);
+    } catch { allowed = false; }
+    if (allowed) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Vary", "Origin");
+    }
+    if (req.method === "OPTIONS") {
+      if (allowed) {
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-tani-forward-secret");
+        res.setHeader("Access-Control-Max-Age", "86400");
+      }
+      return res.status(204).end();
+    }
+    next();
+  });
   // Rate-limit stdlib di jalur tulis. Baca (GET) bebas.
   const writeLimit = rateLimit(60, 60_000);
   app.use((req, _res, next) => (req.method === "POST" ? writeLimit(req as any, _res as any, next) : next()));
@@ -5258,13 +5282,17 @@ export function createServerApp() {
       );
     } catch { ok = false; }
     if (!ok) return res.status(401).json({ error: "No HP / password salah." });
-    res.setHeader("Set-Cookie", `tani_sid=${mintSession(adm.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`);
+    const proto1 = String(req.headers?.["x-forwarded-proto"] || "").split(",")[0].trim();
+    const lax1 = proto1 === "https" ? "; SameSite=None; Secure" : "; SameSite=Lax";
+    res.setHeader("Set-Cookie", `tani_sid=${mintSession(adm.id)}; HttpOnly${lax1}; Path=/; Max-Age=43200`);
     return res.json({ success: true, nama: adm.nama, role: adm.role });
   });
   app.post("/api/auth/logout", (req, res) => {
     const m = String(req.headers?.cookie || "").match(/tani_sid=([a-f0-9]{32})\./);
     if (m) sessions.delete(m[1]);
-    res.setHeader("Set-Cookie", "tani_sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+    const proto2 = String(req.headers?.["x-forwarded-proto"] || "").split(",")[0].trim();
+    const lax2 = proto2 === "https" ? "; SameSite=None; Secure" : "; SameSite=Lax";
+    res.setHeader("Set-Cookie", `tani_sid=; HttpOnly${lax2}; Path=/; Max-Age=0`);
     return res.json({ success: true });
   });
   app.get("/api/auth/me", (req, res) => {

@@ -29,6 +29,7 @@ import {
   X,
   Loader2,
 } from 'lucide-react';
+import { api } from '../api';
 import { FarmerRecord, SupplierRecord, AdminUser } from '../types';
 import { GoogleSheetsOnlineModal } from './GoogleSheetsOnlineModal';
 import { GoogleDriveSheetsConnector } from './GoogleDriveSheetsConnector';
@@ -86,7 +87,7 @@ const UploadDataModal: React.FC<{
       fd.append('file', file);
       fd.append('entity', entity);
       fd.append('senderPhone', senderPhone);
-      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      const res = await api('/api/upload', { method: 'POST', body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Gagal mengunggah berkas.');
       setResult(data);

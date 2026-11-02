@@ -14,6 +14,7 @@ import {
   Database,
   ArrowRight,
 } from 'lucide-react';
+import { api } from '../api';
 import { LayaStatus, LayaDecisionResult } from '../types';
 
 interface LayaModalProps {
@@ -49,7 +50,7 @@ export const LayaModal: React.FC<LayaModalProps> = ({
     if (!textToTest.trim()) return;
     setTestLoading(true);
     try {
-      const res = await fetch('/api/laya/decide', {
+      const res = await api('/api/laya/decide', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: textToTest }),

@@ -17,3 +17,4 @@ data/.session-key
 
 data/uploads/
 data/training/
+.env*

@@ -1,4 +1,4 @@
-﻿import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Send,
   CheckCheck,
@@ -35,6 +35,7 @@ import {
   PackageCheck,
   Zap,
 } from 'lucide-react';
+import { api } from '../api';
 import { ChatMessage, FarmerRecord, SupplierRecord, AdminUser, LayaStatus } from '../types';
 import { WhatsAppFormattedText } from './WhatsAppFormattedText';
 import { WhatsAppVoiceNotePlayer } from './WhatsAppVoiceNotePlayer';
@@ -128,7 +129,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
 
   const fetchAiMetrics = async () => {
     try {
-      const res = await fetch('/api/ai/metrics');
+      const res = await api('/api/ai/metrics');
       if (res.ok) {
         const data = await res.json();
         setAiMetrics(data);
@@ -151,7 +152,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
     }
     setLoading(false);
     try {
-      await fetch('/api/chat/cancel', { method: 'POST' });
+      await api('/api/chat/cancel', { method: 'POST' });
     } catch {}
 
     const cancelNotice: ChatMessage = {
@@ -246,7 +247,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
       reader.onloadend = async () => {
         const base64Data = (reader.result as string).split(',')[1];
         try {
-          const res = await fetch('/api/audio-transcribe', {
+          const res = await api('/api/audio-transcribe', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -353,7 +354,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
           : `Disimpan via validasi lengkap WhatsApp Chatbot. Sinkron ke Google Sheets.`,
       };
 
-      const res = await fetch('/api/farmers', {
+      const res = await api('/api/farmers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -415,7 +416,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
           : `Disimpan via WhatsApp Chatbot ke Google Sheets.`,
       };
 
-      const res = await fetch('/api/suppliers', {
+      const res = await api('/api/suppliers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -499,7 +500,7 @@ export const WhatsAppChatbot: React.FC<WhatsAppChatbotProps> = ({
     activeAbortControllerRef.current = abortController;
 
     try {
-      const res = await fetch('/api/chat', {
+      const res = await api('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: abortController.signal,

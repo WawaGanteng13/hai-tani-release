@@ -13,6 +13,7 @@ import {
   Zap,
   RefreshCw,
 } from 'lucide-react';
+import { api } from '../api';
 
 interface WebhookModalProps {
   isOpen: boolean;
@@ -115,7 +116,7 @@ function onEdit(e) {
   const handleTestPing = async () => {
     setIsPinging(true);
     try {
-      const res = await fetch('/api/webhook/test-ping', { method: 'POST' });
+      const res = await api('/api/webhook/test-ping', { method: 'POST' });
       const data = await res.json();
       setPingResult(data);
       fetchLogs();
@@ -133,7 +134,7 @@ function onEdit(e) {
   const fetchLogs = async () => {
     setLoadingLogs(true);
     try {
-      const res = await fetch('/api/webhook/logs');
+      const res = await api('/api/webhook/logs');
       if (res.ok) {
         const data = await res.json();
         setLogs(data);
