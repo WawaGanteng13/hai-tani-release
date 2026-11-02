@@ -46,7 +46,7 @@ berlatar gelap.
 
 ## 1.1.1 Alternatif teks gambar
 
-6/6 tag `<img>` punya `alt` (5 foto landing + 1 avatar Google).
+6/6 tag `<img>` punya `alt` (5 foto landing + 1 avatar OAuth).
 LULUS.
 
 ## 2.3.3 / prefers-reduced-motion

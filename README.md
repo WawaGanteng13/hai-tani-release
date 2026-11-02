@@ -39,15 +39,15 @@ The focus pivoted to buyer matchmaking: connecting buyers looking for goods with
 
 ```mermaid
 flowchart TD
-    A[Buyer chats WA] --> B[Bot greets]
+    A[Buyer chats WA + states spec] --> B[Bot greets + creates OFR-xxx]
     B --> C[Find ready harvest]
     C --> D[Send farmer list]
     D --> E[Buyer picks and bids]
-    E --> F[Bot forwards to farmer]
-    F --> G{Farmer agrees?}
-    G -->|Yes| H[Deal recorded]
-    G -->|No| I[Re-bid]
+    E --> F[Bot forwards bid + spec to farmer]
+    F --> G{Farmer sanggup?}
+    G -->|Tidak| I[Excluded; re-bid]
     I --> E
+    G -->|Sanggup| H[Deal recorded, spread capped by tier]
     H --> J[Cash recorded]
 ```
 
@@ -83,6 +83,7 @@ Already in code (official Meta patterns):
 - Webhook GET verification: reads hub.mode/hub.verify_token/hub.challenge, matches the token, replies 200 + challenge when mode=subscribe, else 403 (server.ts). Official reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint
 - Webhook POST: parses entry.changes[0].value.messages[0] (text/button/location) + entry.statuses to log; verifies the X-Hub-Signature-256 header (HMAC-SHA256 over rawBody against the app secret); optional FORWARD_SECRET gate; replies 200 EVENT_RECEIVED (server.ts).
 - Outbound Cloud API: POST graph.facebook.com/v24.0/{phoneId}/messages with a Bearer token (sendWaText and sendWaTemplate: template name + language code + body parameters); starter template info_terbaru_taniai; the code notes the customer-service window concept (server.ts). Template reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/templates/overview ; production tokens: https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens ; permissions: https://developers.facebook.com/documentation/business-messaging/whatsapp/permissions
+- Meta Model API first in the multi-provider AI dispatcher (Meta → NIM → 9Router → additional fallbacks → local rule fallback), so negotiation, triage, and Q&A stay up when any single provider fails (server.ts).
 
 Not yet / roadmap:
 
@@ -158,6 +159,14 @@ Server: http://127.0.0.1:3000 (default `PORT` when the env is unset; see server.
 - [Functional test recap 100/100](docs/fase3/01-rekap-uji-fungsional.md)
 - [Stress test 104 rps, 0 failures](docs/fase3/02-uji-stres.md)
 - [WCAG accessibility pre-audit](docs/fase3/03-aksesibilitas-wcag.md)
+
+## Hackathon Submission
+
+Event window 26 Oct – 4 Nov 2026; every commit is inside the window (first commit `150cd69`, 29 Oct 2026; zero commits before the window). The demo opens and closes with negotiation; photo/Q&A appear ≤15 s as agent tools.
+
+- [Portal entry](docs/submission/01-portal-entry.md)
+- [Demo video script](docs/submission/02-demo-script.md) (video v5 EN recorded, ~140 s; upload pending)
+- [Contribution statement](docs/submission/03-contribution.md)
 
 ## Data & Status (MVP)
 

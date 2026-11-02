@@ -34,5 +34,5 @@ anti-spam tidak aktif), header forwarder resmi:
 - Latensi: p50 7 ms, p95 9 ms
 
 Catatan batas: fase chat hanya menguji jalur statis. Jalur LLM
-(Gemini/NIM) tidak di-stres karena biaya dan rate limit; keandalannya
+tidak di-stres karena biaya dan rate limit; keandalannya
 ditutup oleh golden suite (cek 17a/17b media + fallback).

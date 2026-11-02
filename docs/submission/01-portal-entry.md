@@ -19,12 +19,12 @@ Hai Tani (TaniAI) is a WhatsApp-first agentic marketplace for Indonesian smallho
 
 ## Meta tools used
 - WhatsApp Cloud API via Meta for Developers: webhook verification + HMAC-signed POST handling, outbound messaging incl. templates, multi-number free-quota router.
-- Meta Model API in the multi-provider dispatcher (Meta → NIM → 9Router → Gemini + rule fallback).
+- Meta Model API first in the multi-provider dispatcher (Meta → NIM → 9Router → additional fallbacks → local rule fallback).
 - Built with Muse Code (Meta).
 
 ## Links
 - Repo: https://github.com/WawaGanteng13/hai-tani-release (public, full history inside the event window — see 03-contribution.md)
-- Demo video: [TO RECORD — script in 02-demo-script.md]
+- Demo video: recorded — v5 EN VO, ~140 s (opens/closes with WA negotiation; dashboard capture; agronomy tool ≤15 s). File in ops dir (`demo-shot0/out/hai-tani-demo-v5-en.mp4`); portal/YouTube upload pending.
 - Test evidence: docs/fase3/ (functional 100/100, stress 104 rps, WCAG pre-audit)
 
 ## Founder note
