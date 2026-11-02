@@ -86,6 +86,11 @@ jobs:
           FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
         run: node docs/fase3/tier-gate.js "$BASE_URL"
 
+      - name: BLOCKING live gate - role-context (farmer-as-buyer)
+        env:
+          FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
+        run: node docs/fase3/role-context-gate.js "$BASE_URL"
+
       - name: "INFORMATIONAL - stress (reduced: 25rps x 10s, never gates)"
         env:
           FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}

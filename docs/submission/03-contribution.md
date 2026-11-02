@@ -5,7 +5,7 @@ Event window: 26 Oct – 4 Nov 2026. Rule: demo only what was built during the e
 ## Evidence
 - Repository: https://github.com/WawaGanteng13/hai-tani-release (public).
 - First commit: `150cd69` (29 Oct 2026) — "Hai Tani release: WA bot + ERP Fase 5 + traceability + hardening".
-- Commits before 26 Oct 2026: **0**. Commits in window: **69** (29 Oct – 2 Nov).
+- Commits before 26 Oct 2026: **0**. Commits in window: **70** (29 Oct – 2 Nov).
 - Verify: `git log --since="2026-10-26" --until="2026-11-05" --oneline` (entire history).
 
 ## What was built in the window (grouped)
