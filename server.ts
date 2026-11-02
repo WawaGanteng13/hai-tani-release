@@ -2416,8 +2416,11 @@ function resolveCoordinates(locationStr?: string): { lat: number; lng: number } 
 }
 
 function isSupplierIntent(text: string): boolean {
+  // P1-5/P1-6: tanya harga/rekomendasi & kalimat demand BUKAN pendaftaran.
+  if (/harga|berapa|mana (yang|yg) bagus|apakah|bagaimana|gimana|rekomendasi|bagus\?|murah\?|dimana|di mana|\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b/.test((text || "").toLowerCase())) return false;
   const lower = (text || "").toLowerCase();
   return (
+    lower.includes("toko pupuk") || // P1-7: alias sejajar "kios pupuk".
     lower.includes("supplier") ||
     lower.includes("suplier") ||
     lower.includes("kios pupuk") ||
@@ -2697,7 +2700,8 @@ function generateSmartAdminFallback(
     lower.includes("catat") ||
     lower.includes("simpan");
 
-  if (isAddRequest || (lower.includes("petani") && (lower.includes("lahan") || lower.includes("pak ") || lower.includes("bu ")))) {
+  // P1-8: frasa pasif/tanya ("apakah petani sudah terdaftar?") BUKAN aksi daftar.
+  if (!/terdaftar|pendaftaran|daftar sebagai|daftar harga|apakah|bagaimana|berapa/.test(lower) && (isAddRequest || (lower.includes("petani") && (lower.includes("lahan") || lower.includes("pak ") || lower.includes("bu "))))) {
     const { extracted: ext } = extractFarmerFromText(message, currentDraft || {});
     const merged = { ...(currentDraft || {}), ...ext };
     const check = checkFarmerCompleteness(merged);
@@ -3357,9 +3361,9 @@ function detectTopIntent(
 ): string {
   const lower = String(message || "").toLowerCase();
   if (/^\s*batal/i.test(message || "")) return "cancel";
-  if (detectErpIntent(lower, null)) return "erp";
+  if (detectErpIntent(lower, null) && !(/supplier|suplier|distributor/.test(lower) && /catat|tambah|daftar|baru/.test(lower) && !/\b(masuk|keluar)\b/.test(lower) && !ERP_QTY_UNIT_RE.test(lower))) return "erp"; // P0-6 telemetri
   if (isSupplierIntent(message)) return "supplier";
-  if (isRegistrationQuery(lower) && !isListingQuery(lower)) return "register";
+  if (isRegistrationQuery(lower) && !isListingQuery(lower) && !/daftar harga/.test(lower)) return "register"; // P0-2 telemetri
   if (isAdmin && isAnalyticsQuery(lower)) return "analytics";
   if (/harga|pasar|anomali/.test(lower)) return "price";
   if (/hama|penyakit|wereng|ulat|tikus|keong|sundep|blas|kresek|tungro/.test(lower)) return "hama";
@@ -3451,7 +3455,8 @@ function isAddRegex(lower: string): boolean {
   const l = lower || "";
   // Frasa pasif/tanya BUKAN aksi daftar: "terdaftar?", "pendaftaran", "daftar sebagai apa".
   // ("mendaftarkan" tetap aksi: tidak mengandung penanda pasif.)
-  if (/terdaftar|pendaftaran|daftar sebagai/.test(l)) return false;
+  // P0-2: "daftar harga" milik cabang harga, bukan aksi daftar.
+  if (/terdaftar|pendaftaran|daftar sebagai|daftar harga/.test(l)) return false;
   for (const w of ADD_WORDS) if (l.includes(w)) return true;
   return false;
 }
@@ -3495,7 +3500,7 @@ function scrubUnmentionedEstimates(parsedExt: any, evidenceText: string): any {
 
 // ---------- ERP Chat: deteksi intent (regex dulu, Laya saat miss) ----------
 const ERP_CASH_RE = /catat|biaya|pengeluaran|pemasukan|terjual|ongkos|\bbayar\b|\bkas\b|buku kas|modal tanam|jual gabah|panen laku|uang (masuk|keluar)|\brp\b|rupiah/;
-const ERP_STOCK_RE = /stok (masuk|keluar|habis)|sisa stok|tambah stok|kurang stok|stok opname|barang (masuk|keluar)|sisa barang|persediaan/;
+const ERP_STOCK_RE = /stok (masuk|keluar|habis)|sisa stok|tambah stok|kurang stok|stok opname|barang (masuk|keluar)(?! kota| ke | dikirim| ekspedisi)|sisa barang|persediaan/; // P1-11
 const ERP_HPP_RE = /\bhpp\b|biaya pokok|biaya per kilo|margin|untung per kilo|impas|\bbep\b|break even|modal per kilo/;
 const ERP_QTY_UNIT_RE = /([\d][\d.,]*)\s*(sak|kg|liter|botol|bungkus|pak|unit|karung|ton)\b/;
 function detectErpIntent(
@@ -3505,7 +3510,8 @@ function detectErpIntent(
   const t = lower || "";
   // HPP dicek dulu: "biaya per kilo" mengandung kata umum "biaya" milik kas
   if (ERP_HPP_RE.test(t)) return "hpp";
-  if (ERP_CASH_RE.test(t)) return "cash";
+  // P1-9: stok menang atas kas — "catat stok urea masuk 5 sak" milik stok.
+  if (ERP_CASH_RE.test(t) && !ERP_STOCK_RE.test(t) && !(/\b(masuk|keluar)\b/.test(t) && ERP_QTY_UNIT_RE.test(t))) return "cash";
   if (ERP_STOCK_RE.test(t)) return "stock";
   // "urea keluar 5 sak": kata masuk/keluar + qty+satuan, tanpa kata "stok"
   // (\bmasuk\b tidak match "masukkan" milik alur daftar lahan)
@@ -6987,6 +6993,8 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       lower.includes("npk") ||
       lower.includes("takaran");
 
+    // P0-1: "cek harga pupuk urea" = pertanyaan HARGA -> lolos ke cabang harga.
+    if (/harga|berapa|cari harga|info harga|cek harga/.test(lower) && !/dosis|takaran|pemupukan|jadwal|fase|kapan|bagaimana|cara memupuk/.test(lower)) return null;
     if (!hasFertilizerIntent) return null;
 
     // Determine commodity
@@ -7410,7 +7418,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     return undefined;
   }
   const SMALLTALKISH_RE = /^(halo+|hai+|hi+|pagi|siang|sore|malam|makasih|terima kasih|thanks?|ok+|oke+|siap|baik|test|tes|ping|assalamu'?alaikum|punten)[?!.\s]*$/i;
-  const FUNCTIONAL_RE = /daftar|harga|cek |cek$|status|bantuan|help|menu|manfaat|benefit|hama|penyakit|pupuk|dosis|kas\b|stok|hpp|rekap|verifikasi|komoditas|panen|cuaca/i;
+  const FUNCTIONAL_RE = /daftar|harga|cek |cek$|status|bantuan|help|menu|manfaat|benefit|hama|penyakit|pupuk|dosis|kas\b|stok|hpp|rekap|verifikasi|komoditas|panen|cuaca|butuh|jual|beli|cari|order|pesan/i; // P1-24
   function completeOnboardingWeak(user: UserRecord, label: string, draft?: any): void {
     user.role = user.role || "PETANI";
     const dLat = Number(draft?.latitude);
@@ -7775,8 +7783,10 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     }
 
     // 0z. Fast-path smalltalk: 0ms, tanpa LLM/Laya (salam, identitas, makasih, bantuan).
+    // P1-1/P1-25: jawaban deal ("oke"/"siap") milik pendingAsk, bukan smalltalk.
+    const dealPendingP11 = ["KONFIRM_DEAL", "SPEK_OK"].includes(String(usersDb.find((x) => { try { return normalizePhone(x.phone) === normalizePhone(effPhone || ""); } catch { return false; } })?.pendingAsk?.kind || ""));
     const hasOpenDraft = [currentDraft, currentCashDraft, currentStockDraft, currentHppDraft, currentSupplierDraft]
-      .some((d) => d && typeof d === "object" && Object.keys(d).length > 0);
+      .some((d) => d && typeof d === "object" && Object.keys(d).length > 0) || dealPendingP11;
     const topIntent = detectTopIntent(message, isAdmin, activeAdmin, effPhone, hasOpenDraft);
     loggedIntent = topIntent;
     console.log(`[ChatRoute] intent=${topIntent} admin=${isAdmin} len=${String(message || "").length}`);
@@ -8068,8 +8078,9 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       {
         const paN = negoUser?.pendingAsk;
         const msgN = String(message || "");
-        const EXN = /cek penawaran|status penawaran|info penawaran|penawaran saya|^\s*batal\s+OFR|^\s*OFR-\d+\s*$|komoditas saya|kebutuhan saya|kebutuhanku|status kebutuhan|^\s*bantuan\s*$/i;
-        const STN = /\b(stok|ready|siap|tersedia)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
+        // P0-5/P1-13: harga + awalan sopan ("tolong batal OFR-3") lolos pending.
+        const EXN = /cek penawaran|status penawaran|info penawaran|penawaran saya|cek harga|info harga|daftar harga|berapa harga|harga .*berapa|^\s*batal\s+OFR|^\s*OFR-\d+\s*$|komoditas saya|kebutuhan saya|kebutuhanku|status kebutuhan|^\s*bantuan\s*$|(?:tolong|mohon|minta|coba|kak|min)\W+(batal OFR|bantuan|cek (harga|penawaran)|lihat (harga|penawaran)|status (penawaran|kebutuhan))/i;
+        const STN = /\b(stok|ready|siap|tersedia)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo|sak|karung|bungkus|pak|botol|liter)\b/i; // P1-14
         const DMN = /\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
         if (paN && paN.kind === "NUDGE" && !EXN.test(msgN) && !STN.test(msgN) && !DMN.test(msgN)) {
           const nres = handleNudgeAnswer();
@@ -8082,10 +8093,12 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       // demand baru) lolos agar user tak terjebak tak bisa cek status atau
       // lapor stok saat menunggu (jebakan OFR basi, 31 Okt 2026).
       const pa = negoUser?.pendingAsk;
-      const EXPLICIT_RE = /cek penawaran|status penawaran|info penawaran|penawaran saya|^\s*batal\s+OFR|^\s*OFR-\d+\s*$|komoditas saya|kebutuhan saya|kebutuhanku|status kebutuhan|^\s*bantuan\s*$/i;
-      const STOCKCMD_RE = /\b(stok|ready|siap|tersedia)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo)\b/i;
+      // P0-5/P1-13: harga + awalan sopan ("tolong batal OFR-3") lolos pending.
+      const EXPLICIT_RE = /cek penawaran|status penawaran|info penawaran|penawaran saya|cek harga|info harga|daftar harga|berapa harga|harga .*berapa|^\s*batal\s+OFR|^\s*OFR-\d+\s*$|komoditas saya|kebutuhan saya|kebutuhanku|status kebutuhan|^\s*bantuan\s*$|(?:tolong|mohon|minta|coba|kak|min)\W+(batal OFR|bantuan|cek (harga|penawaran)|lihat (harga|penawaran)|status (penawaran|kebutuhan))/i;
+      const STOCKCMD_RE = /\b(stok|ready|siap|tersedia)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo|sak|karung|bungkus|pak|botol|liter)\b/i; // P1-14
       const DEMANDCMD_RE = /\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b[^]*?\d+\s*(ton|kuintal|kwintal|kilogram|kg|kilo|sak|karung|bungkus|pak|botol|liter)\b/i;
-      const SPEKCMD_RE = /^\s*spek\b/i;
+      // P1-17: "spesifikasi: ..." & "ubah spek ..." lolos pending ke mSpek.
+      const SPEKCMD_RE = /^\s*spek\b|^\s*spesifikasi\b|\bubah\s+spek/i;
       const msgStr = String(message || "");
       if (pa && (pa.kind === "HARGA_JUAL" || pa.kind === "BUDGET" || pa.kind === "KONFIRM_DEAL" || pa.kind === "SPEK_OK") && !EXPLICIT_RE.test(msgStr) && !STOCKCMD_RE.test(msgStr) && !DEMANDCMD_RE.test(msgStr) && !SPEKCMD_RE.test(msgStr)) {
         const o = offersDb.find((x) => x.id === pa.offerId && x.status !== "DEAL" && x.status !== "BATAL");
@@ -8180,7 +8193,8 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         }
         return nogoReply(offerStatusText(o, normalizePhone(o.buyerPhone) === mePhone ? "buyer" : "farmer"));
       }
-      const mBatal = String(message || "").match(/^\s*batal\s+(OFR-\d+)\s*$/i);
+      // P1-13: toleran awalan sopan ("tolong batal OFR-3").
+      const mBatal = String(message || "").match(/^\s*(?:tolong|mohon|coba)?\s*batal\s+(OFR-\d+)\s*[?.]*$/i);
       if (mBatal) {
         const o = offersDb.find((x) => x.id.toUpperCase() === mBatal[1].toUpperCase());
         if (!o) return nogoReply(`ⓘ ${mBatal[1].toUpperCase()} tidak ditemukan.`);
@@ -8200,8 +8214,9 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       }
 
       // (2b) Spek buyer ("spek OFR-003: ukuran besar" / "spek: ..."). "-" menghapus.
-      const mSpek = String(message || "").match(/^\s*spek(?:ifikasi)?\s*(?:(OFR-\d+)\s*:|:)?\s*(.+?)\s*$/i);
-      if (mSpek && !/^\s*spek(?:ifikasi)?\s*$/i.test(String(message || ""))) {
+      // P1-17b: "spek" BUKAN prefix "spesifikasi" — dua alternatif eksplisit.
+      const mSpek = String(message || "").match(/^\s*(?:spek|spesifikasi)\s*(?:(OFR-\d+)\s*:|:)?\s*(.+?)\s*$/i);
+      if (mSpek && !/^\s*(?:spek|spesifikasi)\s*$/i.test(String(message || ""))) {
         const spekTxt = String(mSpek[2] || "").replace(/[\r\n"“”]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
         let oS: Offer | undefined;
         if (mSpek[1]) oS = offersDb.find((x) => x.id.toUpperCase() === mSpek[1].toUpperCase());
@@ -8232,8 +8247,15 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       // (3) Demand buyer baru ("butuh kentang 2 ton"). Saprodi lolos ke ERP.
       const SAPRODI_RE = /urea|npk|pupuk|pestisida|herbisida|fungisida|insektisida|\bobat\b|benih|bibit|alsintan|traktor/;
       const mNeed = lowerN.match(/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b\s+(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:ton|kuintal|kwintal|kilogram|kg|kilo))\b/i);
-      if (mNeed) {
-        const kom = String(mNeed[2] || "").replace(/\b(di|ke|dari|untuk|dong|ya|nih)\b/gi, " ").replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
+      // P1-18: dihitung di muka agar "komoditas semu" bisa mengalahkan if (blok inline: return null = hang!).
+      const komNeedPre = String(mNeed?.[2] || "").replace(/\b(di|ke|dari|untuk|dong|ya|nih)\b/gi, " ").replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
+      // P1-2: gerakan/inventaris kios ("stok padi keluar 50 kg ... kios ...")
+      // milik ERP-stok, bukan order. (4) punya guard sepadan; (3b)/(3d) butuh
+      // verba demand sehingga tak terpicu frasa stok.
+      if (mNeed && !/keluar|masuk|kios|toko|gudang/.test(lowerN) && !/^(info|harga|daftar|cara|tanya|berapa|list|katalog)\b/i.test(komNeedPre)) {
+        const kom = komNeedPre;
+        // P1-18: "perlu info harga 5 kg beras" — komoditas semu, bukan order.
+        // (P1-18 dikecualikan pada kondisi if: return null di blok inline = hang.)
         const qty = parseQtyKg(mNeed[3] || "");
         const mSpekInline = String(message || "").match(/(?:spek|spesifikasi)\s*:\s*(.+?)\s*$/i);
         const spekBaru = mSpekInline
@@ -8294,14 +8316,17 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       // (3b) Demand saprodi dari chat ("butuh pupuk urea 2 sak"): siapa pun yang
       // chat mencari input dicatat sebagai kebutuhan (konteks buyer), bukan OFR.
       const mNeedInput = lowerN.match(/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b\s+(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:sak|karung|bungkus|pak|botol|liter|kg|kilo|ton))\b/i);
-      if (mNeedInput && !/sudah beli|\bkas\b|catat|keluar|masuk|rp\b|ribu|juta|bayar|utang|hutang|piutang/.test(lowerN)) {
+      // P1-20: penanda harga ("seharga 300 ribu") = catatan harga, bukan kas.
+      if (mNeedInput && !/sudah beli|\bkas\b|catat|keluar|masuk|bayar|utang|hutang|piutang/.test(lowerN)) {
         const itemRaw = String(mNeedInput[2] || "").replace(/\b(di|ke|dari|untuk|dong|ya|nih)\b/gi, " ").replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
         const jumlahRaw = String(mNeedInput[3] || "").trim();
         const kat = /pupuk|urea|npk|phonska|\bza\b|sp-?36|kcl|dolomit|kompos/.test(itemRaw) ? "PUPUK"
           : /obat|hama|pestisida|herbisida|fungisida|insektisida|wereng|ulat/.test(itemRaw) ? "OBAT"
           : /benih|bibit|seed/.test(itemRaw) ? "BIBIT"
           : /alsintan|traktor|sprayer|cangkul/.test(itemRaw) ? "LAINNYA" : "";
-        if (itemRaw.length >= 3 && kat) {
+        // P1-19: "butuh obat 2 botol untuk anak" = obat manusia, bukan saprodi.
+        const isHumanMedP119 = kat === "OBAT" && /anak|bayi|balita|demam|batuk|pilek|flu|istri|suami|keluarga|orang tua/.test(lowerN);
+        if (itemRaw.length >= 3 && kat && !isHumanMedP119) {
           if (!meFarmer) {
             return nogoReply(`📝 Untuk mencatat kebutuhan *${itemRaw}* (${kat}), nomor ini perlu terdaftar sebagai petani dulu. Ketik *daftar* — 1 menit saja.`);
           }
@@ -8313,7 +8338,8 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             saveNeedsToDisk();
             return nogoReply(`📝 *${open.id} diperbarui:* butuh *${open.item}* ${jumlahRaw} (${kat}). Status: ${open.status} — sedang kami carikan dari toko mitra.`);
           }
-          const rec: FarmerNeed = { id: nextNeedId(), farmerId: meFarmer!.id, kategori: kat as NeedKategori, item: itemRaw, jumlah: jumlahRaw, status: "BARU", createdAt: nowN, updatedAt: nowN };
+          const priceNote = (lowerN.match(/seharga[^.,;!?]{0,40}|\brp\s*[\d.,]+\s*(rb|ribu|juta|jt)?/i) || [""])[0].trim();
+          const rec: FarmerNeed = { id: nextNeedId(), farmerId: meFarmer!.id, kategori: kat as NeedKategori, item: itemRaw, jumlah: jumlahRaw, status: "BARU", catatan: priceNote ? sanitizeText(`info harga: ${priceNote}`, 300) : undefined, createdAt: nowN, updatedAt: nowN };
           needsDb.unshift(rec);
           saveNeedsToDisk();
           return nogoReply(`📝 *Kebutuhan dicatat: ${rec.id}*\nButuh *${itemRaw}* ${jumlahRaw} (${kat}).\n\nKami carikan dari toko pertanian mitra terdekat — ketik "kebutuhan saya" untuk memantau status.`);
@@ -8335,13 +8361,24 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         return nogoReply(`Mau beli/butuh apa, Bpk/Ibu? Sebutkan komoditas + jumlahnya.\n\n• Hasil panen: *"butuh kentang 2 ton"* (+ spek opsional: *"spek: daun lebar"*)\n• Saprodi: *"butuh pupuk urea 2 sak"*`, ["Cek Harga Pasar Hari Ini", "Bantuan"]);
       }
       const mWantNoQty = lowerN.match(/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b\s+(.+)/i);
-      if (mWantNoQty && !/sudah beli|\bkas\b|catat|keluar|masuk|rp\b|ribu|juta|bayar|utang|hutang|piutang/.test(lowerN)) {
+      // P0-3/P1-29: kata-benda ("pesan saya belum dibaca", "perlu bantuan admin")
+      // & frasa gerak ("perlu ke pasar bawa 2 karung") BUKAN niat beli. P1-20:
+      // penanda harga (ribu/juta/rp) diizinkan sbg catatan harga, bukan kas.
+      if (mWantNoQty && !/sudah beli|\bkas\b|catat|keluar|masuk|bayar|utang|hutang|piutang/.test(lowerN) && !/pesan saya|belum dibaca|bantuan|bantu\b|tolong|ke pasar|bawa\b|antar|kirim|pulang|pergi\b|stok|habis|kosong|kios|toko|tersedia|ready/.test(lowerN)) {
         const verbQ = String(mWantNoQty[1] || "").toLowerCase();
         const komQ = String(mWantNoQty[2] || "").replace(/\b(di|ke|dari|untuk|dong|ya|nih|tolong)\b/gi, " ").replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
         const isSaprodiQ = SAPRODI_RE.test(komQ);
         if (/^(cari|carikan|nyari)$/.test(verbQ) && isSaprodiQ) {
           // Niat browse katalog -> lolos ke 0d-affiliate.
-        } else if (komQ.length >= 3) {
+        // P1-18 (3d): "butuh info harga beras" — komoditas semu -> lolos ke harga.
+        } else if (komQ.length >= 3 && !/^(info|harga|daftar|cara|tanya|berapa|list|katalog)\b/.test(komQ) && !(/\bobat\b|pestisida|herbisida|fungisida|insektisida/.test(komQ) && /anak|bayi|balita|demam|batuk|pilek|flu|istri|suami|keluarga/.test(komQ))) { // P1-19b
+          // P1-16: "order gabah 50" — angka tanpa satuan -> tanya SATUAN saja.
+          const bareDigits = String(mWantNoQty[2] || "").match(/\d+(?:[.,]\d+)?/);
+          if (bareDigits) {
+            return nogoReply(
+              `Siap! *${komQ}* ${bareDigits[0]} — satuannya apa? Balas lengkap ya, mis. *"butuh ${komQ} ${bareDigits[0]} kg"* (atau sak/ton/liter).`,
+              ["Cek Harga Pasar Hari Ini", "Bantuan"]);
+          }
           return nogoReply(
             isSaprodiQ
               ? `Mau butuh *${komQ}* berapa banyak? Balas mis. *"butuh ${komQ} 2 sak"*.`
@@ -8352,15 +8389,17 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
 
       // (4) Lapor stok petani ("stok kentang 1,3 ton"). Bukan KMD-nya -> lolos
       // ke ERP/estimasi. Nol eksplisit ("stok X 0 kg") = kosongkan stok.
-      if (meFarmer && /\b(stok|ready|siap|tersedia|ada)\b/.test(lowerN)) {
-        const mQty = lowerN.match(/(\d+(?:[.,]\d+)?)\s*(ton|kuintal|kwintal|kilogram|kg|kilo|t\b|kw\b)/i);
+      // P0-4/P1-28/P1-2: "ada beras 5 kg di rumah untuk makan", "siap antar 5 kg",
+      // "stok keluar ... kios" BUKAN lapor stok jual -> lolos ke ERP/LLM.
+      if (meFarmer && /\b(stok|ready|siap|tersedia|ada)\b/.test(lowerN) && !/untuk (makan|sendiri|keluarga)|di rumah|buat makan|stok habis|tidak ada|tak ada|nggak ada|gak ada|antar|kirim|diantar|dikirim|besok|lusa|keluar|masuk|kios|toko|gudang/i.test(lowerN)) {
+        const mQty = lowerN.match(/(\d+(?:[.,]\d+)?)\s*(ton|kuintal|kwintal|kilogram|kg|kilo|sak|karung|liter|bungkus|pak|botol|t\b|kw\b)/i); // P1-14
         if (mQty) {
           const rawV = Number(mQty[1].replace(/\./g, "").replace(/,/g, "."));
           const uu = mQty[2].toLowerCase();
-          const mult = (uu.startsWith("ton") || uu === "t") ? 1000 : (uu.startsWith("ku") || uu.startsWith("kw")) ? 100 : 1;
+          const mult = (uu.startsWith("ton") || uu === "t") ? 1000 : (uu.startsWith("ku") || uu.startsWith("kw")) ? 100 : (uu === "sak" || uu === "karung") ? 50 : 1; // P1-14: 1 sak/karung = 50 kg.
           const qtyKg = Number.isFinite(rawV) && rawV >= 0 ? rawV * mult : NaN;
           const cleaned = lowerN
-            .replace(/\b(stok|ready|siap|tersedia|ada|panen|hasil|jual|harga|rp|rupiah|per|kg|ton|kuintal|kwintal|kilo|dong|ya|nih)\b/gi, " ")
+            .replace(/\b(stok|ready|siap|tersedia|ada|panen|hasil|jual|harga|rp|rupiah|per|kg|ton|kuintal|kwintal|kilo|sak|karung|liter|bungkus|pak|botol|dong|ya|nih)\b/gi, " ")
             .replace(/[\d.,]+\s*(rb|ribu)?/gi, " ")
             .replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
           const rows = komoditasDb.filter((k) => k.farmerId === meFarmer!.id && (k.status === "AKTIF" || k.status === "PANEN"));
@@ -8407,7 +8446,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
               })
               : undefined;
             if (askPriceFor && negoUser) setAsk(negoUser, "HARGA_JUAL", askPriceFor.id);
-            let replyT = `✅ Stok *${target.komoditas}* tercatat: siap ${fmtKg(qtyKg)} (${target.id}).`;
+            let replyT = `✅ Stok *${target.komoditas}* tercatat: siap ${fmtKg(qtyKg)} (${target.id}).` + ((uu === "sak" || uu === "karung") ? ` (asumsi 1 ${uu} = 50 kg)` : "");
             if (opens.length > 0) {
               const o0 = opens[opens.length - 1];
               replyT += `\n\nAda buyer butuh ${fmtKg(Number(o0.qtyKg))} (${o0.id}).` +
@@ -8695,7 +8734,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       const regU = extractFarmerFromText(message, {});
       const hasEst = !!(regU.extracted.estimasiPanen || regU.extracted.estimasiHasilTon);
       const hasOther = !!(regU.extracted.nama || regU.extracted.komoditas || regU.extracted.luasLahan || regU.extracted.kabupaten || regU.extracted.alamat || regU.extracted.noHp);
-      const erpish = /stok|kios|gudang|jual|beli|\bkas\b|catat|hpp|tambah stok|kurang/.test((message || "").toLowerCase());
+      const erpish = /stok|kios|gudang|jual|beli|\bkas\b|catat(?!\s+(hasil\s+)?panen)|hpp|tambah stok|kurang/.test((message || "").toLowerCase()); // P1-23
       if (hasEst && !hasOther && !erpish && /panen|hasil|ton|kuintal|kwintal|\bkg\b/.test((message || "").toLowerCase()) && !needsReasoningMsg(message)) {
         const idM = String(message || "").match(/TANI-\d+/i);
         const target = isAdmin && idM
@@ -8773,11 +8812,20 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         });
       }
       const erpWriteWords = /catat|masuk|keluar|tambah|input|simpan|hitung|keluarkan|masukkan/;
-      const erpReadCash = /saldo/.test(erpLower) && !erpWriteWords.test(erpLower);
-      const erpReadStock = /sisa stok|cek stok|stok tersedia|stok saat ini/.test(erpLower) && !erpWriteWords.test(erpLower);
+      const erpReadCash = /saldo|cek kas|lihat kas|sisa kas|posisi kas/.test(erpLower) && !erpWriteWords.test(erpLower); // P1-22
+      const erpReadStock = /sisa stok|cek stok|stok tersedia|stok saat ini|stok saya|lihat stok|stok berapa|berapa stok|posisi stok/.test(erpLower) && !erpWriteWords.test(erpLower); // P1-12
       if (erpReadCash || erpReadStock) {
         const erpScope = resolveErpScope(effPhone);
         if (erpReadCash) {
+          // P1-21: utang/piutang belum punya ledger terpisah — jangan sajikan saldo kas.
+          if (/utang|hutang|piutang|pinjam/.test(erpLower)) {
+            return res.json({
+              reply: `💰 *Saldo utang/piutang belum tercatat terpisah.*\nKas hAI Tani saat ini mencatat arus masuk/keluar saja. Ketik *"cek kas"* untuk saldo kas.`,
+              quickReplies: ["Lihat Saldo Kas", "Catat Kas"],
+              isComplete: true,
+              aiProvider: "rule_based",
+            });
+          }
           const rows = erpScope.isAdmin || !erpScope.farmerId ? cashDb : cashDb.filter((c) => c.farmerId === erpScope.farmerId);
           const s = cashSaldo(rows);
           return res.json({
@@ -8843,6 +8891,9 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           /daftar lahan|tambah (lahan|tani|kios|supplier)|supplier baru|berapa harga|harga .*(hari ini|sekarang|pasar)|cek harga|hama|penyakit|konsultasi|rekap|ringkas|ekspor|peta|webhook/.test(erpLower);
         if (!otherIntent) erpIntent = draftScores[0].kind;
       }
+      // P0-6: "catat supplier baru Kios Tani ..." = pendaftaran -> lolos ke 0s.
+      // Gerakan stok ("urea keluar 5 sak ... kios ...") tetap milik ERP.
+      if (/supplier|suplier|distributor|agen\b/.test(erpLower) && /catat|tambah|daftar|baru|didaftar/.test(erpLower) && !/\b(masuk|keluar)\b/.test(erpLower) && !ERP_QTY_UNIT_RE.test(erpLower)) erpIntent = null;
       if (/^\s*batal/i.test(message || "") && (draftScores[0].n > 0 || erpIntent)) {
         return res.json({
           reply: "Baik, draf kas/stok/HPP dibatalkan. Silakan mulai lagi bila perlu.",
@@ -9135,7 +9186,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         (/berapa/.test(lowerAdminMsgTop) || HARGA_ALIAS.some((a) => a.keys.some((k) => hargaKeyHit(lowerAdminMsgTop, k))));
       if (
         (hasHargaWordTop || hasPasarPriceTop) &&
-        !/daftar|tambah|input|catat|simpan|masukkan/.test(lowerAdminMsgTop)
+        (!/daftar|tambah|input|catat|simpan|masukkan/.test(lowerAdminMsgTop) || /daftar harga/.test(lowerAdminMsgTop)) // P0-2
       ) {
         const liveReplyTop = await formatHargaPasarReply(message);
         return res.json({
@@ -9499,7 +9550,7 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
         (/berapa/.test(lowerFarmerMsgTop) || HARGA_ALIAS.some((a) => a.keys.some((k) => hargaKeyHit(lowerFarmerMsgTop, k))));
       if (
         (hasHargaWordTopF || hasPasarPriceTopF) &&
-        !/daftar|tambah|input|catat|simpan|masukkan/.test(lowerFarmerMsgTop)
+        (!/daftar|tambah|input|catat|simpan|masukkan/.test(lowerFarmerMsgTop) || /daftar harga/.test(lowerFarmerMsgTop)) // P0-2
       ) {
         const liveReplyTopF = await formatHargaPasarReply(message);
         return res.json({

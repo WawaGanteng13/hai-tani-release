@@ -91,6 +91,11 @@ jobs:
           FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
         run: node docs/fase3/role-context-gate.js "$BASE_URL"
 
+      - name: BLOCKING live gate - router-shadow (anti-misroute P0/P1)
+        env:
+          FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
+        run: node docs/fase3/router-shadow-gate.js "$BASE_URL"
+
       - name: "INFORMATIONAL - stress (reduced: 25rps x 10s, never gates)"
         env:
           FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
