@@ -7447,7 +7447,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     if (user.onboardingState === "DONE" || user.onboardingState === "DONE_WEAK") return null;
     // Rekognisi: nomor terdaftar di database petani langsung disapa nama —
     // tanpa diminta lengkapi data. SETUJU tetap wajib (gate TOS).
-    if (user.onboardingState !== "DECLINED" && !user.memory?.lastWelcomeBackAt) {
+    if (user.onboardingState !== "DECLINED" && !user.memory?.lastWelcomeBackAt && !/langganan|harga|cek |cek$|berapa|bantuan|help|menu|manfaat|benefit|program|tentang/.test(lower)) {
       const legacy = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(user.phone));
       if (legacy) {
         linkFarmerMemory(user);

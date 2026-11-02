@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SMOKE_PORT: "3101"
+  BASE_URL: http://127.0.0.1:3101
+  DISABLE_LAYA_SIDECAR: "true"
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: typecheck (lint)
+        run: npm run lint
+      - name: static gate - no relative /api/ literals
+        run: node docs/fase3/check-absolute-api.js
+      - name: build (vite + server bundle)
+        run: npm run build
+
+  live-gates:
+    needs: static
+    # Fork PRs never receive secrets -> skip instead of false-red on 401.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: inject FORWARD_SECRET (file + env, single source)
+        env:
+          FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FORWARD_SECRET:-}" ]; then echo "FORWARD_SECRET secret is not set"; exit 1; fi
+          printf 'FORWARD_SECRET=%s\n' "$FORWARD_SECRET" > .env
+          echo "wrote .env (gitignored, removed in teardown)"
+
+      - name: seed CI fixture (users + farmer)
+        run: node docs/fase3/seed-ci-users.js
+
+      - name: boot server (background)
+        env:
+          FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
+          SMOKE_PORT: ${{ env.SMOKE_PORT }}
+          DISABLE_LAYA_SIDECAR: "true"
+        run: |
+          set -euo pipefail
+          npx tsx server.ts > /tmp/taniai-server.log 2>&1 &
+          echo $! > /tmp/taniai-server.pid
+          echo "server pid $(cat /tmp/taniai-server.pid)"
+
+      - name: wait for /api/health (status=ok, max ~120s)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -sf "$BASE_URL/api/health" | grep -q '"status":"ok"'; then
+              echo "healthy after ${i}x2s"; exit 0
+            fi
+            sleep 2
+          done
+          echo "server never became healthy; tail log:"; tail -n 100 /tmp/taniai-server.log
+          exit 1
+
+      - name: BLOCKING live gate - tier-gate (4 assertions)
+        env:
+          FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
+        run: node docs/fase3/tier-gate.js "$BASE_URL"
+
+      - name: INFORMATIONAL - stress (reduced: 25rps x 10s, never gates)
+        env:
+          FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
+        continue-on-error: true
+        run: node docs/fase3/stress.js "$BASE_URL" 25 10
+
+      - name: INFORMATIONAL - contrast (never gates, human judges)
+        continue-on-error: true
+        run: node docs/fase3/contrast.js
+
+      - name: teardown (always)
+        if: always()
+        run: |
+          set +e
+          [ -f /tmp/taniai-server.pid ] && kill "$(cat /tmp/taniai-server.pid)" 2>/dev/null
+          sleep 2
+          pkill -f "tsx server.ts" 2>/dev/null
+          pkill -f "laya_sidecar" 2>/dev/null
+          rm -f .env /tmp/taniai-server.pid
+          echo "--- server log tail ---"; tail -n 50 /tmp/taniai-server.log 2>/dev/null || true
+          echo "--- workspace status (data/ must be gitignored) ---"; git status --porcelain | head -n 30 || true

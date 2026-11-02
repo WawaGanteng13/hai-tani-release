@@ -62,6 +62,8 @@ async function faseBaca(rps, detik) {
 
 function forwardSecret() {
   try {
+    const fromEnv = (process.env.FORWARD_SECRET || '').trim();
+    if (fromEnv) return fromEnv;
     const env = fs.readFileSync(path.join(DIR, '..', '..', '.env'), 'utf8');
     const m = env.match(/^FORWARD_SECRET=(.+)$/m);
     return m ? m[1].trim() : '';

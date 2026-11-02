@@ -14,6 +14,8 @@ const ROOT = path.join(DIR, '..', '..');
 
 function forwardSecret() {
   try {
+    const fromEnv = (process.env.FORWARD_SECRET || '').trim();
+    if (fromEnv) return fromEnv;
     const env = fs.readFileSync(path.join(ROOT, '.env'), 'utf8');
     const m = env.match(/^FORWARD_SECRET=(.+)$/m);
     return (m ? m[1] : '').trim();
