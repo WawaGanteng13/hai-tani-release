@@ -1,6 +1,8 @@
-// Gate peran-kontekstual: petani yang chat mencari barang diproses sebagai buyer.
+// Gate peran-kontekstual: siapa pun yang chat mencari barang diproses sebagai buyer.
 // - Demand panen tak memasukkan stok sendiri sebagai kandidat.
 // - Demand saprodi tercatat sebagai kebutuhan (NDB-xxx), bukan OFR.
+// - Demand tanpa jumlah ditanya balik formatnya (tak dilempar ke LLM).
+// - Admin boleh beli (OFR dengan buyerPhone admin).
 // Pakai: node docs/fase3/role-context-gate.js [baseUrl]
 // Butuh seed: node docs/fase3/seed-ci-users.js (TANI-FFF + stok kentang).
 // FORWARD_SECRET: env dulu, lalu .env (tidak di-commit).
@@ -53,8 +55,14 @@ function check(name, cond, detail) {
 }
 
 const FARMER = '6281110001001'; // TANI-FFF: petani kentang + stok 1 ton (seed)
+const ADMIN = '081234567890'; // ADM-001 mockData: admin boleh jadi buyer
 
-let r = await chat(FARMER, 'butuh kentang 2 ton');
+// Qty-less dulu: setelah OFR dibuat, BUDGET pendingAsk (wajar) menelan pesan non-OFR.
+let r = await chat(FARMER, 'beli agave');
+check('demand-tanpa-qty-ditanya', /berapa banyak/.test(r.json.reply || '') && /butuh agave/.test(r.json.reply || ''), r.json.reply);
+await sleep(2000);
+
+r = await chat(FARMER, 'butuh kentang 2 ton');
 check('demand-tanpa-stok-sendiri', /OFR-\d+/.test(r.json.reply || '') && /Belum ada petani yang lapor stok/.test(r.json.reply || '') && !/CI Kentang Tani/.test(r.json.reply || ''), r.json.reply);
 await sleep(2000);
 
@@ -64,6 +72,10 @@ await sleep(2000);
 
 r = await chat(FARMER, 'kebutuhan saya');
 check('status-kebutuhan', /pupuk urea/.test(r.json.reply || '') && /NDB-/.test(r.json.reply || ''), r.json.reply);
+await sleep(2000);
+
+r = await chat(ADMIN, 'beli agave 5 kg');
+check('admin-bisa-beli', /OFR-\d+/.test(r.json.reply || ''), r.json.reply);
 
 console.log(`\nringkas: ${pass} lolos, ${fail} gagal`);
 process.exit(fail ? 1 : 0);

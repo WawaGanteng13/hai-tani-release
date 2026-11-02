@@ -585,7 +585,7 @@ async function formatHargaPasarReply(message: string): Promise<string> {
 }
 
 // Disk-backed persistence directories & paths
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
 const FARMERS_FILE = path.join(DATA_DIR, "farmers_db.json");
 const ADMINS_FILE = path.join(DATA_DIR, "admins_db.json");
 const SUPPLIERS_FILE = path.join(DATA_DIR, "suppliers_db.json");
@@ -8294,7 +8294,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       // (3b) Demand saprodi dari chat ("butuh pupuk urea 2 sak"): siapa pun yang
       // chat mencari input dicatat sebagai kebutuhan (konteks buyer), bukan OFR.
       const mNeedInput = lowerN.match(/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b\s+(.+?)\s+(\d+(?:[.,]\d+)?\s*(?:sak|karung|bungkus|pak|botol|liter|kg|kilo|ton))\b/i);
-      if (mNeedInput && !/\bkas\b|catat|keluar|masuk|rp\b|ribu|juta|bayar|utang|hutang|piutang/.test(lowerN)) {
+      if (mNeedInput && !/sudah beli|\bkas\b|catat|keluar|masuk|rp\b|ribu|juta|bayar|utang|hutang|piutang/.test(lowerN)) {
         const itemRaw = String(mNeedInput[2] || "").replace(/\b(di|ke|dari|untuk|dong|ya|nih)\b/gi, " ").replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
         const jumlahRaw = String(mNeedInput[3] || "").trim();
         const kat = /pupuk|urea|npk|phonska|\bza\b|sp-?36|kcl|dolomit|kompos/.test(itemRaw) ? "PUPUK"
@@ -8326,6 +8326,28 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         const mine = needsDb.filter((x) => x.farmerId === meFarmer!.id).slice(0, 10);
         if (mine.length === 0) return nogoReply(`ⓘ Belum ada kebutuhan tercatat. Contoh: "butuh pupuk urea 2 sak".`);
         return nogoReply(`📝 *Kebutuhan Anda:*\n` + mine.map((x, i) => `${i + 1}. *${x.item}*${x.jumlah ? ` ${x.jumlah}` : ""} (${x.kategori}) — ${x.status} [\`${x.id}\`]`).join("\n"));
+      }
+
+      // (3d) Demand tanpa jumlah ("beli agave", "butuh kentang"): tanya balik
+      // formatnya, jangan lempar ke LLM. Berlaku semua peran termasuk admin.
+      // "cari <saprodi>" dibiarkan lolos ke pencarian katalog toko (0d).
+      if (/^\s*(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\s*[?.]*$/i.test(lowerN)) {
+        return nogoReply(`Mau beli/butuh apa, Bpk/Ibu? Sebutkan komoditas + jumlahnya.\n\n• Hasil panen: *"butuh kentang 2 ton"* (+ spek opsional: *"spek: daun lebar"*)\n• Saprodi: *"butuh pupuk urea 2 sak"*`, ["Cek Harga Pasar Hari Ini", "Bantuan"]);
+      }
+      const mWantNoQty = lowerN.match(/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b\s+(.+)/i);
+      if (mWantNoQty && !/sudah beli|\bkas\b|catat|keluar|masuk|rp\b|ribu|juta|bayar|utang|hutang|piutang/.test(lowerN)) {
+        const verbQ = String(mWantNoQty[1] || "").toLowerCase();
+        const komQ = String(mWantNoQty[2] || "").replace(/\b(di|ke|dari|untuk|dong|ya|nih|tolong)\b/gi, " ").replace(/[^a-z\s]/gi, " ").replace(/\s+/g, " ").trim();
+        const isSaprodiQ = SAPRODI_RE.test(komQ);
+        if (/^(cari|carikan|nyari)$/.test(verbQ) && isSaprodiQ) {
+          // Niat browse katalog -> lolos ke 0d-affiliate.
+        } else if (komQ.length >= 3) {
+          return nogoReply(
+            isSaprodiQ
+              ? `Mau butuh *${komQ}* berapa banyak? Balas mis. *"butuh ${komQ} 2 sak"*.`
+              : `Mau beli *${komQ}* berapa banyak? Balas mis. *"butuh ${komQ} 5 kg"* (tambah *"spek: ..."* bila ada syarat ukuran/potongan).`,
+            ["Cek Harga Pasar Hari Ini", "Bantuan"]);
+        }
       }
 
       // (4) Lapor stok petani ("stok kentang 1,3 ton"). Bukan KMD-nya -> lolos
@@ -8851,7 +8873,9 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         currentSupplierDraft.kontak);
     const isSupplierRegex = isSupplierIntent(message);
     let isSupplierMsg = isSupplierRegex;
-    if (!isSupplierMsg) {
+    // Niat beli/butuh bukan pendaftaran supplier: jangan tanya Laya agar verdict
+    // "supplier" tak membajak demand buyer ("saya mau beli agave" -> draf supplier).
+    if (!isSupplierMsg && !/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b/i.test(message || "")) {
       const l = await chatLaya();
       isSupplierMsg = l?.intent === "supplier" && (l?.confidence || 0) >= 0.5;
     }

@@ -5,7 +5,7 @@ Event window: 26 Oct – 4 Nov 2026. Rule: demo only what was built during the e
 ## Evidence
 - Repository: https://github.com/WawaGanteng13/hai-tani-release (public).
 - First commit: `150cd69` (29 Oct 2026) — "Hai Tani release: WA bot + ERP Fase 5 + traceability + hardening".
-- Commits before 26 Oct 2026: **0**. Commits in window: **70** (29 Oct – 2 Nov).
+- Commits before 26 Oct 2026: **0**. Commits in window: **71** (29 Oct – 2 Nov).
 - Verify: `git log --since="2026-10-26" --until="2026-11-05" --oneline` (entire history).
 
 ## What was built in the window (grouped)
@@ -20,6 +20,8 @@ Event window: 26 Oct – 4 Nov 2026. Rule: demo only what was built during the e
 - User memory (2 Nov): UserMemory auto-capture/recall, recognition greeting for registered numbers (TOS gate kept), fertilizer memory defaults — live-verified, tier-gate 4/4.
 - SLSA release (2 Nov): v0.1.0-mvp with Level 3 provenance (digests fix, generator v2.1.0).
 - CI pipeline (2 Nov): ci.yml (static + live-gates on ubuntu), CI seed fixture, gate env-fallback, greeting info-passthrough — designed by 5-agent fan-out, live-verified locally.
+- Contextual roles (2 Nov): farmer-as-buyer demand (own-stock exclusion), chat saprodi needs (NDB) + status, qty-less demand clarification, admin buying — role-context-gate 5/5 in CI.
+- Demand misroute fix (2 Nov): buyer demand no longer hijacked into supplier draft (Laya supplier verdict skipped for demand-shaped messages) — reported from live admin chat.
 
 ## Pre-existing (outside the submission claim)
 - Founder domain knowledge, nursery business, farmer interviews (problem discovery).

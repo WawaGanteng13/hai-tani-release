@@ -9,7 +9,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
-const DATA = path.join(DIR, '..', '..', 'data');
+const DATA = process.env.DATA_DIR || path.join(DIR, '..', '..', 'data');
 fs.mkdirSync(DATA, { recursive: true });
 const now = new Date().toISOString();
 
