@@ -24,7 +24,7 @@ Hai Tani (TaniAI) is a WhatsApp-first agentic marketplace for Indonesian smallho
 
 ## Links
 - Repo: https://github.com/WawaGanteng13/hai-tani-release (public, full history inside the event window — see 03-contribution.md)
-- Demo video: https://youtu.be/uEbuX7c5Ox0 — v5 EN VO, ~140 s (opens/closes with WA negotiation; dashboard capture; agronomy tool ≤15 s). Master file in ops dir (`demo-shot0/out/hai-tani-demo-v5-en.mp4`).
+- Demo video: https://youtu.be/uEbuX7c5Ox0 
 - Test evidence: docs/fase3/ (functional 100/100, 51 BLOCKING live-gate checks, stress 104 rps, WCAG pre-audit)
 
 ## Founder note
