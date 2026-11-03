@@ -118,6 +118,28 @@ jobs:
         continue-on-error: true
         run: node docs/fase3/contrast.js
 
+      - name: collect test evidence (gates ran against data/)
+        if: always()
+        run: |
+          set +e
+          mkdir -p test-evidence/db
+          cp /tmp/taniai-server.log test-evidence/server.log 2>/dev/null
+          cp data/*.json test-evidence/db/ 2>/dev/null
+          {
+            echo "sha=${{ github.sha }} run=${{ github.run_id }} date=$(date -u +%FT%TZ)";
+            echo "gates_stdout=see job logs above (durable per run)";
+            ls -la test-evidence test-evidence/db
+          } | tee test-evidence/META.txt
+
+      - name: upload test evidence (30d retention)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-evidence-${{ github.run_id }}
+          path: test-evidence/
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: teardown (always)
         if: always()
         run: |
