@@ -1,24 +1,27 @@
 # Product Requirement Document (PRD)
 ## Hai Tani (Kang Tani AI & AgroSpasial Platform)
 
-**Versi Dokumen:** 1.1.0  
-**Tanggal Rilis:** Oktober 2026 (Amandemen Audit Hardening)  
-**Status:** Disetujui — Amandemen Keamanan, ERP & Data Training  
+**Versi Dokumen:** 1.2.0  
+**Tanggal Rilis:** November 2026 (Amandemen Marketplace Pivot)  
+**Status:** Disetujui — Flagship negosiasi buyer↔petani via WA  
+**Jargon:** Dari Petani untuk Kesejahteraan Petani  
 **Target Pengguna:** Petani Lapangan, Penyuluh Pertanian Lapangan (PPL/BPP), Dinas Pertanian & Ketahanan Pangan, Pemilik Kios Saprodi, Data Scientist Pertanian
 
 ---
 
 ### 1. Ringkasan Eksekutif & Latar Belakang Masalah
-Sektor pertanian tanaman pangan dan hortikultura di Indonesia menghadapi tiga tantangan struktural utama:
+Sektor pertanian tanaman pangan dan hortikultura di Indonesia menghadapi empat tantangan struktural utama:
+0. **Akses Buyer (keluhan #1 petani, flagship):** Petani menjual ke tengkulak yang itu-itu saja; harga panen dibeli murah di pintu kebun sementara tengkulak menguasai penjualan di pasar. Petani hanya dapat margin sangat tipis dan tak punya akses buyer langsung.
 1. **Pencatatan Lahan yang Terfragmentasi:** Data petani sering dicatat manual di atas kertas atau buku kelompok tani, berisiko hilang dan lambat direkapitulasi ke dinas kabupaten/provinsi.
 2. **Keterbatasan Literasi Aplikasi Rumit:** Sebagian besar petani enggan mengunduh aplikasi mobile rumit yang membebani memori smartphone dan memerlukan registrasi akun yang berbelit. Sebaliknya, aplikasi pesan instan WhatsApp sudah digunakan oleh lebih dari 90% petani dan kelompok tani.
 3. **Kesenjangan Informasi Rantai Pasok & Anomali Harga:** Ketiadaan visibilitas stok kios pupuk terdekat dan keterlambatan deteksi gejolak harga komoditas (seperti cabai dan bawang merah) memicu krisis pasokan atau kerugian panen mendalam bagi petani.
 
-Hai Tani hadir sebagai solusi terintegrasi: memanfaatkan antarmuka WhatsApp berbasis conversational AI yang ramah petani ("Kang Tani AI"), dipadukan dengan database Google Sheets transparan, pemetaan spasial Google Maps, dan portal analitik prediksi panen.
+Hai Tani hadir sebagai marketplace agenik WhatsApp-first: fitur utamanya mempertemukan buyer yang cari hasil panen dengan petani siap panen lewat bot negosiasi 2-arah (demand → budget → quote petani → verifikasi spek → alokasi → deal → fulfil), dipadukan database JSON runtime + cermin Google Sheets, peta Google Maps, dan dashboard monitoring. Tanpa unduh aplikasi: cukup chat nomor WA Hai Tani.
 
 ---
 
 ### 2. Tujuan Produk (Product Goals & OKRs)
+* **Transaksi Selesai (flagship):** Buyer membeli lagi dan petani menerima hasil bersih lebih baik — 20 transaksi selesai, dibayar, dan repeat-order sebagai bukti, bukan jumlah fitur.
 * **Adopsi Tanpa Hambatan:** Petani dapat mendaftarkan lahan dan berkonsultasi dalam waktu kurang dari 2 menit melalui WhatsApp tanpa unduh aplikasi baru.
 * **Transparansi Administratif:** Seluruh data pendaftaran otomatis masuk ke Google Sheets resmi dinas secara realtime (0 latency sync).
 * **Efisiensi Logistik Pertanian:** Menghubungkan titik lahan garapan petani dengan kios pupuk dan toko saprodi berizin terdekat dalam radius 25-50 km.
@@ -41,6 +44,10 @@ Hai Tani hadir sebagai solusi terintegrasi: memanfaatkan antarmuka WhatsApp berb
 4. **Data Scientist & Pengambil Kebijakan (Policy Maker):**
    * *Profil:* Analis ketahanan pangan tingkat kabupaten/provinsi.
    * *Kebutuhan:* Simulasi neraca pangan (supply vs demand), identifikasi risiko oversupply atau defisit, rekomendasi stabilisasi harga.
+5. **Buyer / Offtaker (Penggerak Transaksi):**
+   * *Profil:* Pedagang pasar, pengepul non-tengkulak, UMKM olahan, retail.
+   * *Kebutuhan:* Cari pasokan ("butuh bawang 500 kg"), pasang budget, terima quote petani, verifikasi spek (ukuran/potongan), deal, terima foto barang, bayar, terima kiriman — semua via chat WA.
+   * *Batasan Akses:* Hanya melihat penawarannya sendiri; kontak petani termasking sampai deal.
 
 ---
 
@@ -80,6 +87,17 @@ Hai Tani hadir sebagai solusi terintegrasi: memanfaatkan antarmuka WhatsApp berb
 * **FR-06.3 HPP & Margin:** Hitung HPP per kg dari agregat biaya (filter komoditas + musim tanam), margin dan % margin terhadap harga jual; tolak bila volume ≤ 0 atau belum ada biaya.
 * **FR-06.4 Parser Angka Indonesia:** Titik sebagai pemisah ribuan ("1.500.000" → 1500000), koma sebagai desimal — berlaku konsisten di seluruh ekstraktor chat.
 
+#### FR-07: Negosiasi Buyer↔Petani (FLAGSHIP)
+* **FR-07.1 Demand & Budget:** Buyer chat "butuh <komoditas> <qty>" → offer OPEN; "budget <Rp/kg>" tercatat. Petani terkait otomatis dikabari tiap order baru (teks dalam jendela 24 jam, template opener di luar itu; dedupe per farmer).
+* **FR-07.2 Quote & Spek:** Petani pasang harga ("jual <komoditas> <harga>"); spek buyer ("spek OFR-x: ukuran besar") wajib diverifikasi petani (`sanggup`/`tidak`) sebelum alokasi.
+* **FR-07.3 Alokasi & Deal:** Alokasi termurah-dulu; status COCOK → buyer "deal oke" → DEAL terkunci (terminal, tak bisa dibuka lagi); selisih negosiasi di atas komisi tier (5/2/0%) kembali ke petani; komisi masuk kas.
+* **FR-07.4 Peran Kontekstual:** Petani bisa jadi buyer (stok sendiri dikecualikan) dan admin bisa beli — tergantung isi chat, bukan peran akun.
+
+#### FR-08: Fulfil Pasca-DEAL (otomatis via WA)
+* **FR-08.1 Alamat:** Buyer ditanya alamat kirim (teks atau Share Location → tersimpan sebagai alamat + peta).
+* **FR-08.2 Foto & Juri:** Seller diminta foto barang (+ jam kirim); juri vision menilai cocok/tidak — lolos baru diteruskan ke buyer; buyer memberi vonis akhir ("foto oke"/tolak + retake).
+* **FR-08.3 Kirim & Bayar:** Jadwal kirim seller → buyer "sudah bayar" → seller "uang masuk" → SELESAI. Sengketa ("belum terima") membekukan offer + memanggil admin. Perintah: "minta foto", "teruskan lokasi OFR-x".
+
 ---
 
 ### 5. Batasan & Kebutuhan Non-Fungsional (Non-Functional Requirements)
@@ -98,3 +116,5 @@ Hai Tani hadir sebagai solusi terintegrasi: memanfaatkan antarmuka WhatsApp berb
 * **A-Webhook:** Tanpa secret → mode kompatibilitas + warning boot; dengan secret → signature invalid ditolak 403.
 * **A-PII:** Respons AI/chatbot tidak memuat nomor HP penuh untuk non-admin; `/api/trace/:id` tetap publik tapi termasking.
 * **A-Data:** Setiap tulis kas/stok/HPP/registrasi menghasilkan event di log kanonis (BSD §4) dengan `schemaV` terisi.
+* **A-NEGO (Nov 2026):** Demand → notifikasi petani 1x; quote → COCOK + kabari buyer; "deal oke" → DEAL terminal + kabari dua pihak; stok live divalidasi ulang (tak bisa oversell).
+* **A-FULFIL (Nov 2026):** DEAL → tanya alamat → foto lolos juri → "foto oke" → jadwal → "sudah bayar" → "uang masuk" → SELESAI; "belum terima" → SENGKETA + admin.

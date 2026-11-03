@@ -1,14 +1,14 @@
 # Technical Requirement Document (TRD)
 ## Hai Tani (TaniAI Platform Architecture)
 
-**Versi Dokumen:** 1.1.0  
-**Tanggal Rilis:** Oktober 2026 (Amandemen Audit Hardening)  
-**Status:** Approved — Amandemen Keamanan, Parser & Masking  
+**Versi Dokumen:** 1.2.0  
+**Tanggal Rilis:** November 2026 (Amandemen Marketplace Pivot)  
+**Status:** Approved — Rantai Meta-first + mesin negosiasi  
 
 ---
 
 ### 1. Arsitektur Sistem Terdistribusi
-Sistem Hai Tani dirancang dengan arsitektur **Hybrid Edge & Cloud** yang memadukan backend Node.js Express, sidecar mikro-model non-autoregresif (Laya), dan model bahasa besar generasi terbaru (Google Gemini / 9Router Gateway).
+Sistem Hai Tani dirancang dengan arsitektur **Hybrid Edge & Cloud** yang memadukan backend Node.js Express, sidecar mikro-model non-autoregresif (Laya), dispatcher multi-provider **Meta-first** (Meta Model API → NIM → 9Router → fallback lokal), dan mesin negosiasi stateful (offers_db + fulfil).
 
 ```
                       +-----------------------------------+
@@ -23,8 +23,9 @@ Sistem Hai Tani dirancang dengan arsitektur **Hybrid Edge & Cloud** yang memaduk
 |  [Pilar 1: Role-Based Access Control] <---> Admin Phone Directory (adminsDb) + cek aktif  |
 |  [Pilar 2: Regex Fast-Path (0ms)]     ---> Hit: Langsung routing intent        |
 |  [Pilar 3: Laya System-1 Sidecar]     ---> Miss: Panggil http://127.0.0.1:8787 |
-|  [Pilar 4: Universal AI Gateway]      ---> Gemini 2.5 Flash / 9Router Fallback |
+|  [Pilar 4: Universal AI Gateway]      ---> Meta-first: Meta → NIM → 9Router → lokal |
 |  [Pilar 5: Cancellation Controller]   ---> AbortController (Hemat Kuota)      |
+|  [Pilar 6: Mesin Negosiasi]           <---> Offer (demand/budget/quote/spek/deal) + fulfil |
 +--------------------------------------------------------------------------------+
           |                                            |
           v                                            v
@@ -42,13 +43,13 @@ Sistem Hai Tani dirancang dengan arsitektur **Hybrid Edge & Cloud** yang memaduk
 
 | Komponen | Spesifikasi & Versi | Peran Teknis |
 | :--- | :--- | :--- |
-| **Runtime Server** | Node.js v20+ / tsx v4.21.0 | Backend API asynchronous, melayani endpoint REST dan WebSocket. |
+| **Runtime Server** | Node.js v24 / tsx | Backend API asynchronous (CI: ubuntu + Node 24, static + live-gates). |
 | **Web Server Framework**| Express.js v4.21.2 | Routing API, sanitasi input, CORS handling, file static serving. |
 | **Frontend Framework** | React v19.0.1 + TypeScript v5.8.2 | Arsitektur komponen reaktif, hooks kustom, state management lokal. |
 | **Bundler & Tooling**  | Vite v6.2.3 | Kompilasi cepat ESModules, hot replacement dev server. |
 | **CSS & Design Engine**| Tailwind CSS v4.1.14 | Menggunakan `@tailwindcss/vite` modern tanpa dependensi build legacy. |
 | **Spatial Mapping**    | `@vis.gl/react-google-maps` v1.10.1 | Render peta interaktif, marker kustom, bounds viewport pulau Jawa. |
-| **AI LLM SDK**         | `@google/genai` v2.4.0 | Ekstraksi entitas JSON terstruktur, reasoning agronomi tingkat lanjut. |
+| **AI LLM Chain**         | Meta Model API → NIM → 9Router → `@google/genai` → lokal | Arah 100% Muse; dispatcher OpenAI-compatible dengan fallback berlapis. |
 | **Fast Intent Sidecar**| Python 3.10 + HTTP Server (port 8787) | Engine Laya non-autoregresif untuk penentuan intent sub-50ms. |
 | **Visualisasi Data**   | Recharts v3.10.1 | Grafik time-series fluktuasi harga komoditas dan pie chart luas lahan. |
 | **Document Generator** | jsPDF v4.2.1 + jsPDF-AutoTable | Cetak digital kartu registrasi ber-QR Code dan laporan arsitektur. |
@@ -57,12 +58,13 @@ Sistem Hai Tani dirancang dengan arsitektur **Hybrid Edge & Cloud** yang memaduk
 
 ### 3. Integrasi Khusus: Laya Decision Engine (System-1)
 Mengacu pada arsitektur resmi [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya):
-* **Primitif Pertanyaan:** Wajib menggunakan tipe `"choice"` dengan kriteria 5 intent spesifik:
+* **Primitif Pertanyaan:** Wajib menggunakan tipe `"choice"` dengan kriteria intent spesifik:
   1. `daftar_lahan`: Registrasi lahan garapan petani, nama, komoditas, luas, desa/kabupaten.
   2. `cek_harga`: Informasi harga pasar komoditas dan anomali fluktuasi harga.
   3. `hama_pupuk`: Konsultasi penyakit tanaman, wereng, ulat, takaran dosis pupuk.
   4. `supplier`: Pencarian dan registrasi kios saprodi, toko pupuk, dan offtaker.
   5. `lain`: Salam pembuka, ucapan terima kasih, dan percakapan umum.
+  6. `nego` (Nov 2026): demand/budget/quote/spek/deal — pesan berbentuk demand/quote dilewatkan dari verdict `supplier` agar tak dibajak ke draf supplier (anti-misroute P0).
 * **Gating Metrik Keyakinan:** Menggunakan `confidence` terkalibrasi dengan threshold `>= 0.50`. Tidak menggunakan `action.act_probability` (AUROC 0.30 vs confidence 0.77).
 * **Manajemen Thread & Kinerja CPU:**
   * Membatasi `torch.set_num_threads` maksimal pada core fisik untuk menghindari regresi oversubscribing hyperthreads.

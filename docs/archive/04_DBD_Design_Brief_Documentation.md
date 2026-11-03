@@ -1,15 +1,15 @@
 # Design Brief Documentation (DBD)
 ## Hai Tani (Pedoman Desain Antarmuka & Visual Craft)
 
-**Versi Dokumen:** 1.0.0  
-**Tanggal Rilis:** Oktober 2026  
+**Versi Dokumen:** 1.2.0  
+**Tanggal Rilis:** November 2026 (Amandemen Marketplace Pivot)  
 **Status:** Approved  
-**Standar Desain:** Anti-Slop Professionalism (WCAG 2.1 AA Compliant)
+**Standar Desain:** Anti-Slop Professionalism (WCAG 2.1 AA Compliant), rasa SaaS luar negeri
 
 ---
 
 ### 1. Filosofi & Karakter Produk (Product Character)
-Hai Tani dirancang dengan identitas **Kementerian / Balai Pertanian Modern & Sahabat Lapangan Petani**. Desain menjauhi estetika "AI Slop" generik (seperti gradasi ungu-neon acak, teks klise tanpa data, atau kartu melayang bertumpuk tanpa fungsi). Sebaliknya, Hai Tani mengedepankan:
+Hai Tani dirancang dengan identitas **marketplace petani modern rasa SaaS luar negeri** — bukan AI slop, bukan situs dinas kaku. Publik melihat company-profile landing (terbaca tanpa login, Bahasa Indonesia); admin mendapat dashboard fungsional terpisah. Foto petani asli + grafik pendukung wajib hadir (bukan placeholder). Desain menjauhi estetika "AI Slop" generik (seperti gradasi ungu-neon acak, teks klise tanpa data, atau kartu melayang bertumpuk tanpa fungsi). Sebaliknya, Hai Tani mengedepankan:
 * **Fungsionalitas Nyata:** Setiap tombol dan tautan memiliki aksi dan destinasi nyata.
 * **Kejelasan Hierarki Tipografi:** Informasi kunci (nama petani, tonase panen, harga per kilogram) memiliki keterbacaan tinggi di berbagai kondisi pencahayaan layar.
 * **Sentuhan Budaya Lokal yang Santun:** Menggunakan salam khas pertanian Indonesia (*"Sugeng Rahayu"*, *"Matur nuwun"*, sapaan *"Bapak/Ibu"*) yang membangun kepercayaan petani di lapangan.
@@ -37,7 +37,7 @@ Aplikasi dibatasi pada 3 palet warna inti dan 1 warna aksen terkalibrasi:
 
 ### 3. Skala Tipografi (Typography Hierarchy)
 
-Font sistem menggunakan font sans-serif modern dengan keterbacaan tinggi:
+Font display wajib **Bricolage** (ciri khas Hai Tani); body memakai sans-serif modern dengan keterbacaan tinggi:
 * **Display Title (H1):** `text-xl sm:text-2xl font-bold tracking-tight text-slate-900` (Judul halaman utama).
 * **Section Heading (H2):** `text-base sm:text-lg font-bold text-slate-800` (Judul panel dan tab aktif).
 * **Card Title (H3):** `text-sm font-semibold text-slate-800` (Nama petani, kios saprodi).

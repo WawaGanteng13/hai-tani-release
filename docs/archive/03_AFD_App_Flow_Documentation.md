@@ -1,9 +1,9 @@
 # App Flow Documentation (AFD)
 ## Hai Tani (Alur Sistem & Navigasi Antarmuka)
 
-**Versi Dokumen:** 1.0.0  
-**Tanggal Rilis:** Oktober 2026  
-**Status:** Approved  
+**Versi Dokumen:** 1.2.0  
+**Tanggal Rilis:** November 2026 (Amandemen Marketplace Pivot)  
+**Status:** Approved — tambah alur negosiasi + fulfil  
 
 ---
 
@@ -116,7 +116,61 @@ Status -> 'Terverifikasi'  Pesan WA Terkirim ke Petani
 
 ---
 
-### 5. Penanganan Error & Fallback Transisi
+### 5. Alur Negosiasi Buyer↔Petani (FLAGSHIP, Nov 2026)
+
+```
+[Buyer: "butuh bawang 500 kg"] ---> [Offer OPEN dibuat] ---> [Petani terkait OTOMATIS dikabari]
+        |                                                                    |
+        v                                                                    v
+[Buyer: "budget 8000"]                                    [Petani: "jual bawang 7rb"]
+        |                                                                    |
+        +----------------------> [evalOffer] <-------------------------------+
+                                         |
+                          +--------------+--------------+
+                          |                             |
+                    [harga > budget]              [harga ≤ budget]
+                          |                             |
+                    [tetap OPEN +               [COCOK + kabari buyer]
+                     kabari buyer]                       |
+                                                         v
+                                              [Buyer: "deal oke"]
+                                                         |
+                                              [validasi stok live]
+                                                         |
+                                              [DEAL terkunci + kas +
+                                               kabari dua pihak]
+```
+
+* **Spek:** Buyer "spek OFR-x: ..." → petani wajib `sanggup`/`tidak`; `tidak` mengeluarkan barisnya dari alokasi.
+* **Peran kontekstual:** Petani/admin yang chat "butuh ..." diperlakukan sebagai buyer untuk offer itu.
+
+### 6. Alur Fulfil Pasca-DEAL (Nov 2026)
+
+```
+[DEAL] ---> [tanya ALAMAT ke buyer (teks/ShareLoc)]
+                |
+                v
+         [minta FOTO + jam ke seller] ---> [juri vision: cocok?]
+                |                               |       |
+                |                              YA     TIDAK
+                |                               |       |
+                |                        [teruskan]  [retake]
+                |                               |
+                v                               v
+         [buyer: "foto oke"] <-------- [buyer nilai foto]
+                |
+                v
+         [seller: jadwal KIRIM] ---> [buyer: "sudah bayar"]
+                |                            |
+                v                            v
+         [seller: "uang masuk"] ------> [SELESAI ✅]
+                |
+         ["belum terima" → SENGKETA + admin]
+```
+
+* Perintah: "minta foto [OFR-x]", "teruskan/kirim/forward lokasi OFR-x". Batal via chat ditolak untuk DEAL (hubungi admin).
+
+### 7. Penanganan Error & Fallback Transisi
 * **Jika Laya Sidecar Offline:** Backend otomatis mengalihkan klasifikasi intent ke modul rule-based heuristic tanpa memicu pesan error ke pengguna, dan menyalakan cooldown circuit breaker 30 detik.
 * **Jika Kuota Gemini Terbatas:** Sistem otomatis mengalihkan pemrosesan ke gateway cadangan 9Router atau modul respons deterministik lokal.
 * **Jika Pengguna Membatalkan Percakapan:** Soket koneksi yang putus mematikan proses generasi AI seketika demi menghemat token dan menjaga throughput server.

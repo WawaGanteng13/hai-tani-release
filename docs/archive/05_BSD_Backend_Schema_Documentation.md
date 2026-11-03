@@ -1,9 +1,9 @@
 # Backend Schema Documentation (BSD)
 ## Hai Tani (Data Schemas, REST API Contracts & Integrations)
 
-**Versi Dokumen:** 1.1.0  
-**Tanggal Rilis:** Oktober 2026 (Amandemen Audit Hardening)  
-**Status:** Approved — Tambah Skema ERP, Auth & Log Kanonis  
+**Versi Dokumen:** 1.2.0  
+**Tanggal Rilis:** November 2026 (Amandemen Marketplace Pivot)  
+**Status:** Approved — Tambah Skema Offer, Fulfil & UserMemory  
 
 ---
 
@@ -117,6 +117,34 @@ export interface HppReport {
 }
 ```
 
+#### 1.5b Skema Negosiasi & Fulfil (`Offer`, Nov 2026 — FLAGSHIP)
+
+```typescript
+export interface OfferLine {
+  farmerId: string; komoditasId?: string;
+  stokKg: number;                    // snapshot saat demand dibuat
+  hargaPetaniPerKg?: number;         // quote petani ("jual ... 7rb")
+  spekOk?: boolean;                  // verifikasi spek buyer (sanggup/tidak)
+  alokasiKg?: number;                // porsi termurah-dulu (tak bisa oversell)
+  cocok?: boolean;
+}
+export interface Offer {
+  id: string;                        // "OFR-047" via nextId
+  buyerPhone: string; komoditas: string; qtyKg: number;
+  budgetPerKg?: number; spesifikasi?: string;
+  status: 'OPEN' | 'SEBAGIAN' | 'COCOK' | 'DEAL' | 'BATAL'; // DEAL terminal
+  lines: OfferLine[];
+  spreadTotalRp?: number; kasId?: string; // komisi tier 5/2/0% → kas
+  fulfil?: 'ALAMAT' | 'FOTO' | 'KIRIM' | 'BAYAR' | 'SELESAI' | 'SENGKETA' | 'BATAL';
+  alamatKirim?: string; fotoMediaPath?: string; jadwalKirim?: string;
+  bayarAt?: string; selesaiAt?: string;
+  notifiedFarmerIds?: string[]; notifiedBuyerCocok?: boolean; notifiedDeal?: string[];
+}
+```
+
+#### 1.5c Skema Memori User (`UserMemory`, Nov 2026)
+* Preferensi, pola tanam, kondisi lahan dibaca tiap chat dan ditulis otomatis; nomor terdaftar disapa dengan ingatan (greeting rekognisi); stempel `lastInboundAt` + `lastWaInboundAt` (jendela Meta sejati, dicap sebelum respons).
+
 #### 1.6 Skema Sesi & Auth Dashboard
 * `AdminUser.passwordHash?: string` — format `salt:scryptHex` (scrypt 32B, Node built-in).
 * Cookie `tani_sid = <sid>.<hmac-sha256(sid)>` — `HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`; store in-memory + sliding expiry 12 jam; kunci di `DATA_DIR/.session-key` (0600).
@@ -184,12 +212,18 @@ export interface MarketCommodity {
 #### 2.3 Operasi CRUD Data Pertanian
 * **GET `/api/farmers`** - Mengambil seluruh data petani terdaftar.
 * **POST `/api/farmers`** - Menambahkan data pendaftaran lahan manual.
-* **PATCH `/api/farmers/:id/verify`** - Mengubah status verifikasi (`Terverifikasi` / `Pending`).
+* **POST `/api/farmers/:id/verify`** - Mengubah status verifikasi (`Terverifikasi` / `Pending`). (Catatan Nov 2026: kode memakai POST, bukan PATCH.)
 * **DELETE `/api/farmers/:id`** - Menghapus data petani.
 * **GET `/api/suppliers`** - Mengambil seluruh data kios saprodi.
 * **POST `/api/suppliers`** - Menambahkan kios baru.
 * **GET `/api/export-csv`** - Mengunduh file CSV Lembar 1 Petani.
 * **GET `/api/export-suppliers-csv`** - Mengunduh file CSV Lembar 2 Supplier.
+
+#### 2.4 Endpoint Negosiasi, Media & Lokasi (Nov 2026)
+* Seluruh negosiasi + fulfil berjalan lewat **`POST /api/chat`** (perintah: "butuh …", "budget …", "jual …", "spek …", "cek penawaran", "deal oke", "minta foto", "teruskan lokasi OFR-x").
+* **`POST /api/wa-media`** — voice/image/document dari forwarder (foto seller masuk juri fulfil bila DEAL aktif fase FOTO, selain itu diagnosa agronomi).
+* **`POST /api/wa-location`** — ShareLoc (buyer mengisi alamat kirim saat fase ALAMAT; seller meneruskan titik ke buyer).
+* **`GET /api/publik/ringkas`** + **`GET /api/harga-pasar`** — data publik tanpa login (dipakai landing + dashboard publik).
 
 ---
 
