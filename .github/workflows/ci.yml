@@ -14,6 +14,7 @@ env:
   BASE_URL: http://127.0.0.1:3101
   DISABLE_LAYA_SIDECAR: "true"
   DISABLE_WA_OUTBOUND: "true"
+  DISABLE_VISION_JUDGE: "true"
 
 jobs:
   static:
@@ -101,6 +102,11 @@ jobs:
         env:
           FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
         run: node docs/fase3/order-notify-gate.js "$BASE_URL"
+
+      - name: BLOCKING live gate - deal-fulfil (alamat-foto-kirim-bayar-selesai)
+        env:
+          FORWARD_SECRET: ${{ secrets.FORWARD_SECRET }}
+        run: node docs/fase3/deal-fulfil-gate.js "$BASE_URL"
 
       - name: "INFORMATIONAL - stress (reduced: 25rps x 10s, never gates)"
         env:

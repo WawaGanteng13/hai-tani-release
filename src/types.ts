@@ -164,13 +164,15 @@ export interface UserRecord {
   feedbackCount?: number;
   // F3: pertanyaan negosiasi yang menunggu jawaban user ini.
   // F6: kind 'NUDGE' = pertanyaan proaktif harga (nudge harian).
-  pendingAsk?: { kind: 'HARGA_JUAL' | 'BUDGET' | 'KONFIRM_DEAL' | 'NUDGE' | 'SPEK_OK'; offerId: string; ts: string; nudge?: { komoditasId: string; field: 'harga' } };
+  pendingAsk?: { kind: 'HARGA_JUAL' | 'BUDGET' | 'KONFIRM_DEAL' | 'NUDGE' | 'SPEK_OK' | 'ALAMAT' | 'FOTO_OK' | 'JADWAL_KIRIM' | 'BAYAR' | 'TERIMA_UANG'; offerId: string; ts: string; nudge?: { komoditasId: string; field: 'harga' } };
   // F6 session-maximizer: 1x sodoran/hari + opt-out permanen.
   lastNudgeAt?: string;
   nudgeOptOut?: boolean;
   memory?: UserMemory;
   // Notifikasi order: stempel inbound terakhir (jendela 24 jam Meta).
   lastInboundAt?: string;
+  // Jendela Meta SEJATI: hanya inbound via WhatsApp (viaWa), bukan dashboard/probe.
+  lastWaInboundAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -227,6 +229,18 @@ export interface Offer {
   followupAt?: string;
   // Notifikasi order: farmerId yang sudah dikabari (1x per offer).
   notifiedFarmerIds?: string[];
+  // Loop deal: buyer dikabari COCOK / over-budget; DEAL dikabari ke kedua pihak.
+  notifiedBuyerCocok?: boolean;
+  notifiedBuyerOver?: boolean;
+  notifiedDeal?: string[];
+  // Fulfil pasca-DEAL: ALAMAT->FOTO->KIRIM->BAYAR->SELESAI (SENGKETA/BATAL = macet).
+  fulfil?: 'ALAMAT' | 'FOTO' | 'KIRIM' | 'BAYAR' | 'SELESAI' | 'SENGKETA' | 'BATAL';
+  alamatKirim?: string;
+  alamatLoc?: { lat: number; lng: number; label?: string; mapsUrl?: string };
+  fotoMediaPath?: string;
+  jadwalKirim?: string;
+  bayarAt?: string;
+  selesaiAt?: string;
   catatan?: string;
   kasId?: string;
   createdAt: string;

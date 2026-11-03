@@ -1385,6 +1385,11 @@ function toWaNumber(phone?: string): string {
 }
 type WaSendResult = { to: string; ok: boolean; messageId?: string; errorCode?: number; error?: string };
 async function waPostGraph(path: string, payload: Record<string, unknown>, timeoutMs = 8000): Promise<{ ok: boolean; json: any; status: number }> {
+  // Kill-switch terpusat (smoke/CI): tanpa HTTP apa pun, kuota tak tersentuh.
+  if (process.env.DISABLE_WA_OUTBOUND === "true") {
+    console.log(`[WA out] dimatikan (smoke) -> ${String((payload as any)?.to || "?")}`);
+    return { ok: false, json: null, status: 0 };
+  }
   const { token } = waOutboundConfig();
   const __via = String((payload as any)?.__via || "");
   const __to = String((payload as any)?.to || "");
@@ -1491,6 +1496,41 @@ async function broadcastWaTemplate(targets: { nama: string; noHp: string }[], te
   return out;
 }
 
+// Gambar: upload dulu (POST /PHONE_NUMBER_ID/media multipart -> ID), lalu kirim by ID.
+async function sendWaImage(toRaw: string, buf: Buffer, mime: string, caption: string): Promise<WaSendResult> {
+  const to = toWaNumber(toRaw);
+  if (!/^62[0-9]{8,13}$/.test(to)) return { to, ok: false, error: "nomor tujuan tidak valid" };
+  if (process.env.DISABLE_WA_OUTBOUND === "true") return { to, ok: false, error: "outbound dimatikan (smoke)" };
+  try {
+    const { token, phoneId } = waOutboundConfig();
+    if (!token || !phoneId) return { to, ok: false, error: "WHATSAPP_ACCESS_TOKEN belum dikonfigurasi" };
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("file", new Blob([buf as any], { type: mime || "image/jpeg" }), "foto.jpg");
+    const up = await fetch(`https://graph.facebook.com/${WA_GRAPH_VERSION}/${phoneId}/media`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form as any, signal: AbortSignal.timeout(20000),
+    });
+    const uj: any = await up.json().catch(() => null);
+    const mid = uj && uj.id ? String(uj.id) : "";
+    if (!up.ok || !mid) return { to, ok: false, errorCode: Number(uj?.error?.code) || undefined, error: String(uj?.error?.message || `upload HTTP ${up.status}`).slice(0, 200) };
+    const r = await waPostGraph("/messages", { to, type: "image", image: { id: mid, caption: String(caption || "").slice(0, 1024) } });
+    return waResult(to, r);
+  } catch (err: any) {
+    return { to, ok: false, error: String((err && err.message) || err).slice(0, 200) };
+  }
+}
+// Lokasi: kirim pin Share Location (butuh jendela 24 jam; di luar itu 131047).
+async function sendWaLocation(toRaw: string, lat: number, lng: number, name: string, address: string): Promise<WaSendResult> {
+  const to = toWaNumber(toRaw);
+  if (!/^62[0-9]{8,13}$/.test(to)) return { to, ok: false, error: "nomor tujuan tidak valid" };
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { to, ok: false, error: "koordinat tidak valid" };
+  try {
+    const r = await waPostGraph("/messages", { to, type: "location", location: { latitude: lat, longitude: lng, name: String(name || "").slice(0, 1000), address: String(address || "").slice(0, 1000) } });
+    return waResult(to, r);
+  } catch (err: any) {
+    return { to, ok: false, error: String((err && err.message) || err).slice(0, 200) };
+  }
+}
 // Notifikasi order baru ke petani (OFR-047: Annisa->Joji tanpa kabar). Proaktif,
 // 1x per (offer, farmer). Dalam jendela 24 jam Meta -> teks bebas; di luar itu
 // -> template opener (teks bebas ditolak 131047), detail menyusul saat petani
@@ -1509,27 +1549,209 @@ async function notifyFarmersNewOrder(o: Offer): Promise<void> {
     if (!f || !f.noHp) continue;
     const u = usersDb.find((x) => normalizePhone(x.phone) === normalizePhone(f.noHp));
     if (u && u.status === "BLOCKED") continue;
-    const lastIn = u && u.lastInboundAt ? Date.parse(u.lastInboundAt) : 0;
-    const inWindow = !!lastIn && Date.now() - lastIn < 24 * 3600e3;
     const body = `Pesanan baru ${o.id}: buyer butuh ${o.komoditas} ${fmtKg(Number(o.qtyKg) || 0)}${Number(o.budgetPerKg) ? ` (budget ${fmtRp(Number(o.budgetPerKg))}/kg)` : ""}.${o.spesifikasi ? `\nSpek: ${o.spesifikasi}.` : ""}\nStok Anda tercatat ${fmtKg(Number(l.stokKg) || 0)} — balas harga jual, mis. "jual ${o.komoditas} 8000".`;
-    try {
-      if (dry) {
-        emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { farmerId: l.farmerId, channel: inWindow ? "text" : "template", dry: true } });
-      } else if (inWindow) {
-        const r = await sendWaText(f.noHp, body);
-        console.log(`[Notify] ${o.id} -> ${l.farmerId} ${r.ok ? "TERKIRIM" : "GAGAL " + (r.error || "")}`);
-        if (!r.ok) continue;
-        emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { farmerId: l.farmerId, channel: "text" } });
-      } else {
-        const r = await sendWaTemplate(f.noHp, WA_OPENER_TEMPLATE, "id", []);
-        console.log(`[Notify] ${o.id} -> ${l.farmerId} opener ${r.ok ? "TERKIRIM" : "GAGAL " + (r.error || "")}`);
-        if (!r.ok) continue;
-        emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { farmerId: l.farmerId, channel: "template" } });
-      }
-      sent.add(l.farmerId); changed = true;
-    } catch (e: any) { console.log(`[Notify] ${o.id} -> ${l.farmerId} EXC ${String((e && e.message) || e).slice(0, 120)}`); }
+    const ch = await sendNotifyText(f.noHp, body, `${o.id} -> ${l.farmerId}`);
+    if (ch === "none") continue;
+    emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { farmerId: l.farmerId, channel: ch, dry } });
+    sent.add(l.farmerId); changed = true;
   }
   if (changed) { o.notifiedFarmerIds = [...sent]; o.updatedAt = new Date().toISOString(); saveOffersToDisk(); }
+}
+
+const notifyInflight = new Set<string>();
+// Kirim teks proaktif dengan hormat jendela 24 jam Meta (SEJATI: lastWaInboundAt).
+// Kembali: "text" | "template" | "none" (diblokir / gagal; dry tetap hitung cabang).
+async function sendNotifyText(phoneRaw: string, body: string, tag: string): Promise<"text" | "template" | "none"> {
+  const u = usersDb.find((x) => normalizePhone(x.phone) === normalizePhone(phoneRaw));
+  if (u && u.status === "BLOCKED") return "none";
+  const lastIn = u && u.lastWaInboundAt ? Date.parse(u.lastWaInboundAt) : 0;
+  const inWindow = !!lastIn && Date.now() - lastIn < 24 * 3600e3;
+  if (process.env.DISABLE_WA_OUTBOUND === "true") {
+    console.log(`[Notify:dry] ${tag} -> ${inWindow ? "text" : "template"}`);
+    return inWindow ? "text" : "template";
+  }
+  try {
+    if (inWindow) {
+      const r = await sendWaText(phoneRaw, body);
+      console.log(`[Notify] ${tag} ${r.ok ? "TERKIRIM" : "GAGAL " + (r.error || "")}`);
+      return r.ok ? "text" : "none";
+    }
+    const r = await sendWaTemplate(phoneRaw, WA_OPENER_TEMPLATE, "id", []);
+    console.log(`[Notify] ${tag} opener ${r.ok ? "TERKIRIM" : "GAGAL " + (r.error || "")}`);
+    return r.ok ? "template" : "none";
+  } catch (e: any) {
+    console.log(`[Notify] ${tag} EXC ${String((e && e.message) || e).slice(0, 120)}`);
+    return "none";
+  }
+}
+// Buyer dikabari saat offer MASUK COCOK atau semua-harga-di-atas-budget.
+// Dipanggil fire-and-forget dari evalOffer (hook transisi); in-flight guard
+// cegah kirim ganda; flag persisten cegah kirim ulang.
+async function notifyBuyerOffer(o: Offer, ev: { cocokKg: number; overLines: OfferLine[]; waitingPrice: number }, kind: "cocok" | "over"): Promise<void> {
+  const key = o.id + ":buyer:" + kind;
+  if (notifyInflight.has(key)) return;
+  if (kind === "cocok" ? o.notifiedBuyerCocok : o.notifiedBuyerOver) return;
+  notifyInflight.add(key);
+  try {
+    const alloc = o.lines.filter((l) => Number(l.alokasiKg) > 0);
+    const cheapest = alloc.sort((a, b) => Number(a.hargaPetaniPerKg) - Number(b.hargaPetaniPerKg))[0];
+    const fBest = cheapest ? farmersDb.find((x) => x.id === cheapest.farmerId) : undefined;
+    const body = kind === "cocok"
+      ? `Kabar baik! ${o.id} COCOK: ${o.komoditas} ${fmtKg(ev.cocokKg)} @ ${fmtRp(Number(cheapest?.hargaPetaniPerKg) || 0)}/kg dari ${fBest ? fBest.nama : "petani"}.\nBalas "deal oke" untuk kunci transaksi, atau "batal ${o.id}".`
+      : `Info ${o.id}: harga termurah ${fmtRp(Math.min(...ev.overLines.map((l) => Number(l.hargaPetaniPerKg))))}/kg di atas budget ${fmtRp(Number(o.budgetPerKg))}/kg Anda.\nBalas "budget <angka>" untuk menaikkan, atau "batal ${o.id}".`;
+    const ch = await sendNotifyText(o.buyerPhone, body, `${o.id} buyer:${kind}`);
+    if (ch === "none") return;
+    if (kind === "cocok") o.notifiedBuyerCocok = true; else o.notifiedBuyerOver = true;
+    o.updatedAt = new Date().toISOString();
+    saveOffersToDisk();
+    emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { to: "buyer", kind, channel: ch, dry: process.env.DISABLE_WA_OUTBOUND === "true" } });
+  } finally {
+    notifyInflight.delete(key);
+  }
+}
+// DEAL terkunci -> kabari kedua belah pihak (petani siapkan barang, buyer terima resi).
+async function notifyDealClosed(o: Offer): Promise<void> {
+  const key = o.id + ":deal";
+  if (notifyInflight.has(key)) return;
+  notifyInflight.add(key);
+  try {
+    const done = new Set(o.notifiedDeal || []);
+    const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+    for (const l of o.lines) {
+      if (!(Number(l.alokasiKg) > 0) || done.has(l.farmerId)) continue;
+      const f = farmersDb.find((x) => x.id === l.farmerId);
+      if (!f || !f.noHp) continue;
+      const ch = await sendNotifyText(f.noHp, `DEAL ${o.id}! Siapkan ${o.komoditas} ${fmtKg(Number(l.alokasiKg))} @ ${fmtRp(Number(l.hargaPetaniPerKg))}/kg untuk buyer. Total Anda terima ${fmtRp(Number(l.alokasiKg) * Number(l.hargaPetaniPerKg))}.`, `${o.id} deal->${l.farmerId}`);
+      if (ch === "none") continue;
+      done.add(l.farmerId);
+      emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { to: "farmer", phase: "deal", farmerId: l.farmerId, channel: ch, dry } });
+    }
+    if (!done.has("BUYER")) {
+      const total = o.lines.reduce((a, l) => a + (Number(l.alokasiKg) || 0) * Number(o.budgetPerKg || 0), 0);
+      const ch = await sendNotifyText(o.buyerPhone, `DEAL ${o.id} terkunci: ${o.komoditas} ${fmtKg(Number(o.qtyKg))}. Total ${fmtRp(total)}. Petani menyiapkan barang — ketik "cek penawaran" untuk status. 📍 Alamat kirim ke mana? Balas alamat lengkap (atau bagikan Share Location).`, `${o.id} deal->buyer`);
+      if (ch !== "none") {
+        done.add("BUYER");
+        emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { to: "buyer", phase: "deal", channel: ch, dry } });
+      }
+    }
+    o.notifiedDeal = [...done];
+    o.updatedAt = new Date().toISOString();
+    saveOffersToDisk();
+  } finally {
+    notifyInflight.delete(key);
+  }
+}
+
+// Alamat masuk -> fulfil FOTO + minta foto & jadwal ke seller beralokasi.
+async function advanceFulfilToFoto(o: Offer): Promise<void> {
+  o.fulfil = "FOTO";
+  o.updatedAt = new Date().toISOString();
+  saveOffersToDisk();
+  const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+  const targets = o.lines.filter((l) => Number(l.alokasiKg) > 0);
+  for (const l of (targets.length > 0 ? targets : o.lines)) {
+    const f = farmersDb.find((x) => x.id === l.farmerId);
+    if (!f || !f.noHp) continue;
+    const ch = await sendNotifyText(f.noHp, `Pesanan ${o.id} lanjut! Buyer sudah isi alamat. Kirim FOTO barang ${o.komoditas} ${fmtKg(Number(l.alokasiKg) || Number(o.qtyKg))} + jam kirim, mis. "kirim besok jam 9".`, `${o.id} foto-request->${l.farmerId}`);
+    if (ch === "none") continue;
+    emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { to: "farmer", phase: "foto-request", farmerId: l.farmerId, channel: ch, dry } });
+  }
+}
+// Fulfil dibekukan (sengketa/batal tengah jalan): kabari buyer + seller + admin.
+async function notifyFulfilFrozen(o: Offer, byPhone: string): Promise<void> {
+  const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+  const parties: { phone: string; label: string }[] = [{ phone: o.buyerPhone, label: "buyer" }];
+  for (const l of o.lines) {
+    if (!(Number(l.alokasiKg) > 0)) continue;
+    const f = farmersDb.find((x) => x.id === l.farmerId);
+    if (f && f.noHp) parties.push({ phone: f.noHp, label: l.farmerId });
+  }
+  for (const p of parties) {
+    const ch = await sendNotifyText(p.phone, `Info ${o.id}: transaksi DIBEKUKAN sementara (sengketa/pembatalan). Admin Hai Tani akan menghubungi kedua pihak. Ketik "cek penawaran" untuk status.`, `${o.id} frozen->${p.label}`);
+    if (ch === "none") continue;
+    emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { to: p.label === "buyer" ? "buyer" : "farmer", phase: "frozen", channel: ch, dry } });
+  }
+  try {
+    const admins = (adminsDb as any[]).filter((a) => a && a.aktif !== false).map((a) => a.noHp || a.phone || a.wa).filter(Boolean);
+    for (const ap of admins.slice(0, 5)) {
+      await sendNotifyText(String(ap), `Sengketa ${o.id} (${o.komoditas}, diminta ${maskPhone(byPhone)}). Cek dashboard untuk mediasi.`, `${o.id} frozen->admin`);
+    }
+  } catch {}
+}
+
+// ---- Fulfil media/lokasi: foto seller dinilai lalu diteruskan ke buyer;
+// ShareLoc buyer mengisi alamat kirim, ShareLoc seller diteruskan ke buyer.
+// (getUser/touchUser nested di handler chat; versi module-scope di sini.)
+function fulfilFindUser(phone: string): UserRecord | undefined {
+  const key = normalizePhone(phone);
+  if (!key) return undefined;
+  return usersDb.find((u) => normalizePhone(u.phone) === key);
+}
+function fulfilTouchUser(u: UserRecord): void {
+  u.updatedAt = new Date().toISOString();
+  saveUsersToDisk();
+}
+function pickFulfilFotoOffer(senderPhone: string): Offer | undefined {
+  const hit = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(senderPhone));
+  if (!hit) return undefined;
+  return offersDb
+    .filter((o) => o.status === "DEAL" && o.fulfil === "FOTO"
+      && o.lines.some((l) => l.farmerId === hit.id && Number(l.alokasiKg) > 0))
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+}
+const JADWAL_HINT_RE = /(kirim|ambil|antar|diambil|diantar|jam|besok|lusa|senin|selasa|rabu|kamis|jumat|sabtu|minggu|\d{1,2}[:.]\d{2})/i;
+async function handleFulfilFoto(senderPhone: string, buf: Buffer, mime: string, mediaPath: string, caption: string): Promise<string | null> {
+  const o = pickFulfilFotoOffer(senderPhone);
+  if (!o) return null;
+  const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+  if (mediaPath) o.fotoMediaPath = mediaPath;
+  const cap = String(caption || "").trim();
+  if (cap.length >= 4 && JADWAL_HINT_RE.test(cap)) o.jadwalKirim = sanitizeText(cap, 200);
+  let verdict = { cocok: false, alasan: "penilaian gagal, kirim ulang foto yang jelas" };
+  try { verdict = await judgeImageForOffer(buf, mime, o); } catch {}
+  o.updatedAt = new Date().toISOString();
+  saveOffersToDisk();
+  if (!verdict.cocok) {
+    emitCanonicalEvent({ source: "wa-media", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { to: "farmer", phase: "foto-tahan", alasan: verdict.alasan.slice(0, 120), dry } });
+    return `📸 Foto ${o.id} DITAHAN: ${verdict.alasan}. Kirim ulang foto ${o.komoditas} yang jelas (terang & fokus).`;
+  }
+  const sent = dry ? true : (await sendWaImage(o.buyerPhone, buf, mime, `Foto barang ${o.id} dari petani — balas "foto oke" bila setuju.`).catch(() => ({ ok: false } as any))).ok;
+  const bU = fulfilFindUser(o.buyerPhone);
+  if (bU) { bU.pendingAsk = { kind: "FOTO_OK", offerId: o.id, ts: new Date().toISOString() }; fulfilTouchUser(bU); }
+  emitCanonicalEvent({ source: "wa-media", entity: "offer", entityId: o.id, action: "notify", actor: "system", payload: { to: "buyer", phase: "foto-cocok", channel: dry ? "dry" : (sent ? "image" : "none"), dry } });
+  const jadNote = o.jadwalKirim ? ` Jadwal "${o.jadwalKirim}" ikut tercatat.` : "";
+  return `📸 *Foto ${o.id} LOLOS penilaian* ("${verdict.alasan}") — diteruskan ke buyer.${jadNote}${dry ? " (mode uji: tanpa kirim WA)" : ""}`;
+}
+async function handleFulfilLocation(senderPhone: string, loc: { latitude: number; longitude: number }, mapsUrl: string, label: string): Promise<string | null> {
+  const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+  const me = normalizePhone(senderPhone);
+  // (a) Buyer isi alamat kirim via ShareLoc saat fulfil ALAMAT.
+  const asBuyer = offersDb
+    .filter((o) => o.status === "DEAL" && o.fulfil === "ALAMAT" && normalizePhone(o.buyerPhone) === me)
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+  if (asBuyer) {
+    asBuyer.alamatKirim = sanitizeText(`Share Location${label ? ": " + label : ""} ${mapsUrl}`, 500);
+    asBuyer.updatedAt = new Date().toISOString();
+    saveOffersToDisk();
+    const bU = fulfilFindUser(senderPhone);
+    if (bU && bU.pendingAsk && bU.pendingAsk.offerId === asBuyer.id) { bU.pendingAsk = undefined; fulfilTouchUser(bU); }
+    await advanceFulfilToFoto(asBuyer).catch(() => {});
+    return `📍 *Lokasi pengiriman ${asBuyer.id} tercatat!*\n${mapsUrl}\n\nPetani kami minta kirim foto barang. Ketik "cek penawaran" untuk progres.`;
+  }
+  // (b) Seller teruskan titik ke buyer (pengiriman aktif).
+  const fhit = farmersDb.find((f) => normalizePhone(f.noHp) === me);
+  if (fhit) {
+    const asSeller = offersDb
+      .filter((o) => o.status === "DEAL" && !!o.fulfil && !["SELESAI", "BATAL", "SENGKETA"].includes(o.fulfil)
+        && o.lines.some((l) => l.farmerId === fhit.id && Number(l.alokasiKg) > 0))
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+    if (asSeller) {
+      const sent = dry ? true : (await sendWaLocation(asSeller.buyerPhone, loc.latitude, loc.longitude, label || `Lokasi ${fhit.nama}`, mapsUrl).catch(() => ({ ok: false } as any))).ok;
+      emitCanonicalEvent({ source: "wa-location", entity: "offer", entityId: asSeller.id, action: "notify", actor: "system", payload: { to: "buyer", phase: "lokasi-forward", channel: dry ? "dry" : (sent ? "location" : "none"), dry } });
+      return `📍 Lokasi Anda diteruskan ke buyer ${asSeller.id}.${dry ? " (mode uji: tanpa kirim WA)" : ""}`;
+    }
+  }
+  return null;
 }
 
 // Universal Entity Extractor from conversation text / voice note
@@ -2188,6 +2410,7 @@ function findStockCandidates(komoditas: string, excludeFarmerId?: string): Farme
 }
 // Alokasi termurah-dulu (maksimalkan selisih untuk kas) + status + spread.
 function evalOffer(o: Offer): { cocokKg: number; overLines: OfferLine[]; waitingPrice: number } {
+  const beforeEvStatus = o.status; // hook notifikasi buyer di bawah (transisi OPEN->COCOK / over).
   // Status terminal tak pernah dievaluasi ulang (defense in depth): DEAL/BATAL final, kuitansi utuh.
   if (o.status === "DEAL" || o.status === "BATAL") {
     const cocokKg = o.lines.reduce((acc, l) => acc + (Number(l.alokasiKg) || 0), 0);
@@ -2232,6 +2455,8 @@ function evalOffer(o: Offer): { cocokKg: number; overLines: OfferLine[]; waiting
     o.spreadTotalRp = 0;
   }
   o.updatedAt = new Date().toISOString();
+  if (beforeEvStatus !== "COCOK" && o.status === "COCOK" && !o.notifiedBuyerCocok) void notifyBuyerOffer(o, { cocokKg, overLines, waitingPrice }, "cocok").catch(() => {});
+  else if (o.status !== "COCOK" && overLines.length > 0 && (beforeEvStatus === "OPEN" || beforeEvStatus === "SEBAGIAN") && !o.notifiedBuyerOver) void notifyBuyerOffer(o, { cocokKg, overLines, waitingPrice }, "over").catch(() => {});
   return { cocokKg, overLines, waitingPrice };
 }
 function clearOfferAsks(offerId: string): void {
@@ -2265,6 +2490,12 @@ function offerStatusText(o: Offer, viewer: "buyer" | "farmer"): string {
     const toFarmers = o.lines.reduce((acc, l) => acc + (Number(l.alokasiKg) || 0) * Number(l.hargaPetaniPerKg || 0), 0);
     tail = `\n• Total ke petani: ${fmtRp(toFarmers)} | Komisi Hai Tani: ${fmtRp(Number(o.spreadTotalRp) || 0)}`;
     if (o.status === "DEAL") tail += ` (kas ${o.kasId || "-"})`;
+    if (o.status === "DEAL" && o.fulfil) {
+      const tahap: Record<string, string> = { ALAMAT: "menunggu alamat buyer", FOTO: "menunggu foto seller", KIRIM: "menunggu jadwal kirim", BAYAR: "menunggu pembayaran", SELESAI: "selesai ✅", SENGKETA: "dibekukan (sengketa)", BATAL: "dibatalkan" };
+      tail += `\n• Pengiriman: ${tahap[o.fulfil] || o.fulfil}`;
+      if (o.alamatKirim) tail += `\n• Alamat: ${String(o.alamatKirim).slice(0, 120)}`;
+      if (o.jadwalKirim) tail += `\n• Jadwal: ${String(o.jadwalKirim).slice(0, 120)}`;
+    }
   }
   void viewer;
   return head + lines + tail;
@@ -3283,6 +3514,22 @@ ${cap ? `Konteks dari pengirim: "${cap}"\n` : ""}Jawab bahasa Indonesia santai-p
     },
   ];
   return stripCodeFences(await generateMediaWithFallback(ai, contents)).trim();
+}
+
+// Juri foto fulfil: cocokkan foto seller vs komoditas+spek buyer (verdict JSON).
+// BUKAN prompt agronomi — ini gerbang teruskan/tahan. Stub CI via DISABLE_VISION_JUDGE.
+async function judgeImageForOffer(buf: Buffer, mime: string, o: Offer): Promise<{ cocok: boolean; alasan: string }> {
+  if (process.env.DISABLE_VISION_JUDGE === "true") return { cocok: true, alasan: "stub" };
+  const ai = getGemini();
+  if (!ai) throw new Error("kunci AI belum valid");
+  const prompt = `Kamu pemeriksa kualitas marketplace pertanian. Buyer memesan: ${o.komoditas} ${fmtKg(Number(o.qtyKg) || 0)}. Spesifikasi buyer: ${o.spesifikasi || "(tidak ada spesifikasi khusus)"}.\nNilai foto barang dari seller ini. Jawab HANYA JSON valid: {"cocok": true|false, "alasan": "..."}. Cocok = komoditas benar + kondisi wajar + foto jelas (bukan hitam/buram total). Tegas tapi adil; alasan 1 kalimat Indonesia.`;
+  const text = await generateMediaWithFallback(ai, [{ role: "user", parts: [{ inlineData: { mimeType: mime || "image/jpeg", data: buf.toString("base64") } }, { text: prompt }] }]);
+  try {
+    const j = JSON.parse(stripCodeFences(text));
+    return { cocok: !!j.cocok, alasan: String(j.alasan || "").slice(0, 300) };
+  } catch {
+    return { cocok: false, alasan: "penilaian tak terbaca, kirim ulang foto yang jelas" };
+  }
 }
 
 // Media (voice+vision) memakai rantai model yang sama dengan teks: bila model
@@ -5902,6 +6149,12 @@ export function createServerApp() {
         });
       }
       // kind === "image"
+      // Fulfil dulu: foto seller untuk DEAL aktif -> dinilai, bukan diagnosa.
+      const fulfilFotoReply = await handleFulfilFoto(String(senderPhone || ""), buf, String(mimeType || "image/jpeg"), mediaPath, String(caption || "")).catch(() => null);
+      if (fulfilFotoReply) {
+        trainingLog({ ...mBase, caption: String(caption || "").slice(0, 500), analysis: clipText(fulfilFotoReply), ok: true, ms: Date.now() - t0m });
+        return res.json({ ok: true, kind, savedMedia: mediaPath, reply: fulfilFotoReply, aiProvider: "rule_based", ms: Date.now() - t0m });
+      }
       let analysis = "";
       try {
         analysis = await analyzeImageBuffer(buf, mimeType || "image/jpeg", String(caption || ""));
@@ -6000,9 +6253,11 @@ export function createServerApp() {
       const weakNote = r.weak
         ? `\n\n⚠️ Titik terlihat di luar Indonesia — bila kurang tepat, balas dengan nama desa/kabupaten yang benar.`
         : "";
-      let reply = r.updated
+      // Fulfil: ShareLoc buyer mengisi alamat / seller meneruskan titik.
+      const fulfilLocReply = await handleFulfilLocation(String(senderPhone || ""), loc, r.mapsUrl, r.label || "").catch(() => null);
+      let reply = fulfilLocReply || (r.updated
         ? `📍 *Lokasi diterima!* Koordinat lahan Anda kami perbarui ke ${r.mapsUrl}${r.label ? `\n📌 ${r.label}` : ""}${weakNote}\n\nKetik *bantuan* untuk lanjut.`
-        : `📍 *Lokasi diterima!* Titik ${r.mapsUrl} tersimpan.${r.label ? `\n📌 ${r.label}` : ""}${weakNote}\n\nUntuk melengkapi pendaftaran, balas dengan: nama, komoditas, luas lahan, dan desa/kabupaten.`;
+        : `📍 *Lokasi diterima!* Titik ${r.mapsUrl} tersimpan.${r.label ? `\n📌 ${r.label}` : ""}${weakNote}\n\nUntuk melengkapi pendaftaran, balas dengan: nama, komoditas, luas lahan, dan desa/kabupaten.`);
       if (locJustDone) {
         const du = getUser(senderPhone);
         if (du) reply = `📍 *Lokasi diterima!* ${r.mapsUrl}${weakNote}\n\n${doneReply(du)}`;
@@ -7674,6 +7929,15 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             }
           }
         } catch (err) { console.error("[Affiliate] tempel gagal:", (err as any)?.message || err); }
+        try {
+          // Stempel jendela SEJATI sebelum respons: bait respons sudah di kernel
+          // saat origJson kembali, jadi simpan sesudah-kirim berpacu dengan
+          // klien yang membaca state tepat setelah respons (gate viawa-dicap).
+          if ((raw as any).viaWa === true) {
+            const mu0 = getUser(String(senderPhone || ""));
+            if (mu0) { mu0.lastWaInboundAt = new Date().toISOString(); touchUser(mu0); }
+          }
+        } catch {}
         const out = origJson(body);
         try {
           const farmerHit = farmersDb.find((f) => normalizePhone(f.noHp) === normalizePhone(senderPhone));
@@ -7693,6 +7957,11 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           if (mu) {
             linkFarmerMemory(mu);
             logActivity(mu, String(loggedIntent || (body as any)?.aiProvider || "chat"), String(message || ""));
+            // Jendela Meta SEJATI: hanya inbound via WhatsApp (forwarder kirim viaWa).
+            if ((raw as any).viaWa === true) {
+              mu.lastWaInboundAt = new Date().toISOString();
+              touchUser(mu);
+            }
           }
         } catch {}
         return out;
@@ -7903,7 +8172,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         reply, quickReplies: qr, extracted: {}, isComplete: true,
         isAdminAction: !!isAdmin, aiProvider: "rule_based",
       } as any);
-      const setAsk = (u: UserRecord, kind: "HARGA_JUAL" | "BUDGET" | "KONFIRM_DEAL" | "SPEK_OK", offerId: string) => {
+      const setAsk = (u: UserRecord, kind: "HARGA_JUAL" | "BUDGET" | "KONFIRM_DEAL" | "SPEK_OK" | "ALAMAT" | "FOTO_OK" | "JADWAL_KIRIM" | "BAYAR" | "TERIMA_UANG", offerId: string) => {
         u.pendingAsk = { kind, offerId, ts: new Date().toISOString() };
         touchUser(u);
       };
@@ -7977,6 +8246,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       const doBudget = (o: Offer, price: number): string => {
         o.budgetPerKg = price;
         o.budgetAt = new Date().toISOString();
+        o.notifiedBuyerOver = undefined; // budget baru -> over boleh dikabari lagi.
         const ev = evalOffer(o);
         saveOffersToDisk();
         emitCanonicalEvent({
@@ -8033,9 +8303,17 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           return `*${o.id} belum bisa DEAL* - stok live berkurang sejak alokasi:\n${kurang.join("\n")}\n\nKetik "cek penawaran" untuk alokasi terbaru.`;
         }
         const { kasId, spread, tierTxt } = finalizeOfferDeal(o, mePhone);
-        clearOfferAsks(o.id);
+        void notifyDealClosed(o).catch(() => {}); // kabari kedua belah pihak (async).
+        clearOfferAsks(o.id); // dulu, agar kickoff fulfil di bawah tak terhapus.
+        // Fulfil kickoff: buyer ditanya alamat kirim (jawab langsung + pendingAsk).
+        o.fulfil = "ALAMAT";
+        o.updatedAt = new Date().toISOString();
+        saveOffersToDisk();
+        const dealBuyerU = getUser(o.buyerPhone);
+        if (dealBuyerU) setAsk(dealBuyerU, "ALAMAT", o.id);
+        
         const kasTxt = kasId ? ` Komisi ${fmtRp(spread)}${tierTxt} masuk kas Hai Tani (\`${kasId}\`).` : " Tanpa selisih komisi.";
-        return `✅ *DEAL ${o.id}!* ${fmtKg(Number(o.qtyKg))} ${o.komoditas} — buyer ${fmtRp(Number(o.budgetPerKg))}/kg.${kasTxt}\n\n${offerStatusText(o, "buyer")}`;
+        return `✅ *DEAL ${o.id}!* ${fmtKg(Number(o.qtyKg))} ${o.komoditas} — buyer ${fmtRp(Number(o.budgetPerKg))}/kg.${kasTxt}\n\n${offerStatusText(o, "buyer")}\n\n📍 *Alamat kirim ke mana?* Balas alamat lengkap (atau bagikan Share Location).`;
       };
 
       // (0) F6-tarikan: admin reset + petani lapor/minta pengingat harga
@@ -8145,6 +8423,118 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       // P1-17: "spesifikasi: ..." & "ubah spek ..." lolos pending ke mSpek.
       const SPEKCMD_RE = /^\s*spek\b|^\s*spesifikasi\b|\bubah\s+spek/i;
       const msgStr = String(message || "");
+      // (1f) Fulfil pasca-DEAL: ALAMAT/FOTO_OK/JADWAL_KIRIM/BAYAR/TERIMA_UANG.
+      // Berdiri SEBELUM (1) karena (1) membuang ask offer-DEAL. Pesan fungsional
+      // (demand/batal/status/lokasi/foto) + draf terbuka lolos.
+      const paF = negoUser?.pendingAsk;
+      const fulfilKinds = ["ALAMAT", "FOTO_OK", "JADWAL_KIRIM", "BAYAR", "TERIMA_UANG"];
+      const isFuncF = EXPLICIT_RE.test(msgStr) || STOCKCMD_RE.test(msgStr) || DEMANDCMD_RE.test(msgStr) || SPEKCMD_RE.test(msgStr)
+        || /^\s*(?:tolong|mohon|coba)?\s*batal\s+OFR/i.test(msgStr)
+        || /^\s*(?:teruskan|kirim|forward)\s+(?:lokasi|location|share\s*loc|map|maps)\s+OFR-\d+/i.test(msgStr)
+        || /^\s*minta foto/i.test(msgStr);
+      if (paF && fulfilKinds.includes(paF.kind) && !hasOpenDraft && !isFuncF) {
+        const oF = offersDb.find((x) => x.id === paF.offerId && x.status !== "BATAL");
+        if (!oF || oF.status !== "DEAL" || !oF.fulfil || ["SELESAI", "BATAL", "SENGKETA"].includes(oF.fulfil)) { clearAsk(); }
+        else if (/^\s*batalkan/i.test(msgStr)) { clearAsk(); return nogoReply(`ⓘ Keluar dari isian ${oF.id}. Ketik "cek penawaran" kapan pun untuk lanjut.`, ["Cek Penawaran"]); }
+        else if (paF.kind === "ALAMAT") {
+          const addr = String(message || "").trim();
+          if (addr.length >= 10) {
+            oF.alamatKirim = sanitizeText(addr, 500);
+            oF.updatedAt = new Date().toISOString();
+            saveOffersToDisk();
+            clearAsk();
+            await advanceFulfilToFoto(oF).catch(() => {});
+            return nogoReply(`📍 *Alamat tercatat untuk ${oF.id}.*\n${oF.alamatKirim}\n\nPetani kami minta kirim foto barang. Ketik "cek penawaran" untuk progres.`, ["Cek Penawaran"]);
+          }
+          return nogoReply(`📍 *Alamat kirim ke mana untuk ${oF.id}?* Balas alamat lengkap (atau bagikan Share Location). Ketik "batalkan" untuk keluar.`);
+        } else if (paF.kind === "FOTO_OK") {
+          const t = String(message || "");
+          if (/tidak|jelek|buruk|kurang|tolak|ulang|bukan/i.test(t)) {
+            const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+            for (const l of oF.lines) {
+              if (!(Number(l.alokasiKg) > 0)) continue;
+              const f = farmersDb.find((x) => x.id === l.farmerId);
+              if (!f || !f.noHp) continue;
+              const ch = await sendNotifyText(f.noHp, `Foto untuk ${oF.id} ditolak buyer ("${t.trim().slice(0, 120)}"). Kirim ulang foto ${oF.komoditas} yang lebih jelas.`, `${oF.id} foto-retake->${l.farmerId}`);
+              if (ch !== "none") emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: oF.id, action: "notify", actor: "system", payload: { to: "farmer", phase: "foto-retake", farmerId: l.farmerId, channel: ch, dry } });
+            }
+            return nogoReply(`📸 Kami minta petani kirim ulang fotonya. Ketik "cek penawaran" untuk progres.`, ["Cek Penawaran"]);
+          }
+          if (/foto oke|foto ok|setuju|cocok|oke|ok\b|ya\b|bagus|mantap/i.test(t)) {
+            oF.fulfil = "KIRIM";
+            oF.updatedAt = new Date().toISOString();
+            saveOffersToDisk();
+            clearAsk();
+            const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+            for (const l of oF.lines) {
+              if (!(Number(l.alokasiKg) > 0)) continue;
+              const f = farmersDb.find((x) => x.id === l.farmerId);
+              if (!f || !f.noHp) continue;
+              const fu = usersDb.find((x) => normalizePhone(x.phone) === normalizePhone(f.noHp));
+              if (fu) { fu.pendingAsk = { kind: "JADWAL_KIRIM", offerId: oF.id, ts: new Date().toISOString() }; touchUser(fu); }
+              const ch = await sendNotifyText(f.noHp, `Foto ${oF.id} DISETUJUI buyer! Kapan barang dikirim? Balas jadwal, mis. "kirim besok jam 9" atau "ambil sendiri sabtu".`, `${oF.id} jadwal-request->${l.farmerId}`);
+              if (ch !== "none") emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: oF.id, action: "notify", actor: "system", payload: { to: "farmer", phase: "jadwal-request", farmerId: l.farmerId, channel: ch, dry } });
+            }
+            return nogoReply(`✅ *Foto disetujui.* Menunggu jadwal kirim petani untuk ${oF.id}. Ketik "cek penawaran" untuk progres.`, ["Cek Penawaran"]);
+          }
+          return nogoReply(`📸 Foto barang ${oF.id} sudah kami teruskan. Ketik "minta foto" untuk melihat, lalu balas "foto oke" bila setuju (atau tulis alasan tolak).`, ["Cek Penawaran"]);
+        } else if (paF.kind === "JADWAL_KIRIM") {
+          const jad = String(message || "").trim();
+          if (jad.length >= 4) {
+            oF.jadwalKirim = sanitizeText(jad, 200);
+            oF.fulfil = "BAYAR";
+            oF.updatedAt = new Date().toISOString();
+            saveOffersToDisk();
+            clearAsk();
+            const bU = getUser(oF.buyerPhone);
+            if (bU) setAsk(bU, "BAYAR", oF.id);
+            const ch = await sendNotifyText(oF.buyerPhone, `Pengiriman ${oF.id}: *${oF.jadwalKirim}*. Total bayar ${fmtRp(Number(oF.qtyKg) * Number(oF.budgetPerKg || 0))}. Sudah bayar? Balas "sudah bayar".`, `${oF.id} bayar-request->buyer`);
+            if (ch !== "none") emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: oF.id, action: "notify", actor: "system", payload: { to: "buyer", phase: "bayar-request", channel: ch, dry: process.env.DISABLE_WA_OUTBOUND === "true" } });
+            return nogoReply(`🚚 *Jadwal tercatat untuk ${oF.id}:* ${oF.jadwalKirim}\n\nBuyer kami minta selesaikan pembayaran.`, ["Cek Penawaran"]);
+          }
+          return nogoReply(`🚚 *Kapan ${oF.id} dikirim?* Balas jadwal, mis. "kirim besok jam 9".`);
+        } else if (paF.kind === "BAYAR") {
+          const tB = String(message || "");
+          if (/\bbelum\b/i.test(tB) && !/sudah|udah|lunas/i.test(tB)) return nogoReply(`💰 Baik, kabari bila sudah transfer untuk ${oF.id} ("sudah bayar").`);
+          if (/sudah bayar|udah bayar|sudah transfer|udah transfer|lunas|dibayar|bayar/i.test(tB)) {
+            for (const l of oF.lines) {
+              if (!(Number(l.alokasiKg) > 0)) continue;
+              const f = farmersDb.find((x) => x.id === l.farmerId);
+              if (!f || !f.noHp) continue;
+              const fu = usersDb.find((x) => normalizePhone(x.phone) === normalizePhone(f.noHp));
+              if (fu) { fu.pendingAsk = { kind: "TERIMA_UANG", offerId: oF.id, ts: new Date().toISOString() }; touchUser(fu); }
+              const ch = await sendNotifyText(f.noHp, `Buyer mengaku SUDAH BAYAR ${oF.id} (${fmtRp(Number(oF.qtyKg) * Number(oF.budgetPerKg || 0))}). Uang sudah masuk? Balas "uang masuk" atau "belum terima".`, `${oF.id} terima-request->${l.farmerId}`);
+              if (ch !== "none") emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: oF.id, action: "notify", actor: "system", payload: { to: "farmer", phase: "terima-request", farmerId: l.farmerId, channel: ch, dry: process.env.DISABLE_WA_OUTBOUND === "true" } });
+            }
+            clearAsk();
+            return nogoReply(`💰 *Diteruskan ke petani untuk konfirmasi.* ${oF.id} selesai setelah petani konfirmasi terima.`, ["Cek Penawaran"]);
+          }
+          return nogoReply(`💰 *Sudah bayar ${oF.id}?* Balas "sudah bayar" bila transfer lunas.`);
+        } else if (paF.kind === "TERIMA_UANG") {
+          const t = String(message || "");
+          if (/\bbelum\b/i.test(t)) {
+            oF.fulfil = "SENGKETA";
+            oF.updatedAt = new Date().toISOString();
+            saveOffersToDisk();
+            clearAsk();
+            await notifyFulfilFrozen(oF, mePhone).catch(() => {});
+            return nogoReply(`ⓘ ${oF.id} dibekukan (sengketa). Admin kami hubungi. Terima kasih laporannya.`, ["Cek Penawaran"]);
+          }
+          if (/uang masuk|udah masuk|sudah terima|diterima|masuk|lunas|terima\b/i.test(t)) {
+            oF.fulfil = "SELESAI";
+            oF.selesaiAt = new Date().toISOString();
+            oF.bayarAt = oF.bayarAt || oF.selesaiAt;
+            oF.updatedAt = new Date().toISOString();
+            saveOffersToDisk();
+            clearAsk();
+            const dry = process.env.DISABLE_WA_OUTBOUND === "true";
+            const chB = await sendNotifyText(oF.buyerPhone, `Selesai! ${oF.id} LUNAS & lengkap. Terima kasih bertransaksi via Hai Tani.`, `${oF.id} selesai->buyer`);
+            if (chB !== "none") emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: oF.id, action: "notify", actor: "system", payload: { to: "buyer", phase: "selesai", channel: chB, dry } });
+            return nogoReply(`🎉 *${oF.id} SELESAI!* Pembayaran lunas, terima kasih. Sampai jumpa di panen berikutnya.`, ["Cek Penawaran"]);
+          }
+          return nogoReply(`💰 Uang ${oF.id} sudah masuk? Balas "uang masuk" atau "belum terima".`);
+        }
+      }
       if (pa && (pa.kind === "HARGA_JUAL" || pa.kind === "BUDGET" || pa.kind === "KONFIRM_DEAL" || pa.kind === "SPEK_OK") && !EXPLICIT_RE.test(msgStr) && !STOCKCMD_RE.test(msgStr) && !DEMANDCMD_RE.test(msgStr) && !SPEKCMD_RE.test(msgStr)) {
         const o = offersDb.find((x) => x.id === pa.offerId && x.status !== "DEAL" && x.status !== "BATAL");
         if (!o) {
@@ -8258,6 +8648,57 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         return nogoReply(`✅ ${o.id} dibatalkan.`);
       }
 
+      // (2f) Fulfil: "minta foto [OFR-x]" + "teruskan/kirim/forward lokasi OFR-x".
+      const mFoto = String(message || "").match(/^\s*minta\s+foto(?:\s+(OFR-\d+))?\s*[?.]*$/i);
+      if (mFoto) {
+        const oM = mFoto[1]
+          ? offersDb.find((x) => x.id.toUpperCase() === mFoto[1].toUpperCase())
+          : offersDb.filter((x) => x.status === "DEAL" && normalizePhone(x.buyerPhone) === mePhone && !!x.fotoMediaPath)
+            .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+        if (!oM) return nogoReply(`ⓘ Tidak ada penawaran DEAL dengan foto barang.`);
+        if (normalizePhone(oM.buyerPhone) !== mePhone && !isAdmin) return nogoReply(`ⓘ Hanya buyer ${oM.id} yang bisa melihat fotonya.`);
+        if (!oM.fotoMediaPath) return nogoReply(`ⓘ ${oM.id} belum punya foto barang dari petani.`);
+        if (process.env.DISABLE_WA_OUTBOUND === "true") return nogoReply(`📸 (mode uji) Foto ${oM.id} tersimpan di server. Di produksi foto dikirim ke WA Anda.`);
+        try {
+          const rel = String(oM.fotoMediaPath).replace(/\\/g, "/");
+          if (!rel || rel.includes("..")) return nogoReply(`ⓘ Path foto ${oM.id} tidak valid.`);
+          const bufM = fs.readFileSync(path.join(TRAINING_DIR, rel));
+          const mimeM = /\.png$/i.test(rel) ? "image/png" : /\.webp$/i.test(rel) ? "image/webp" : "image/jpeg";
+          const rm = await sendWaImage(mePhone, bufM, mimeM, `Foto barang ${oM.id}`);
+          return nogoReply(rm.ok ? `📸 Foto ${oM.id} dikirim ke WA Anda.` : `ⓘ Gagal kirim foto ${oM.id}: ${(rm.error || "coba lagi").slice(0, 120)}.`);
+        } catch {
+          return nogoReply(`ⓘ File foto ${oM.id} tidak ditemukan di server.`);
+        }
+      }
+      const mLocFwd = String(message || "").match(/^\s*(?:teruskan|kirim|forward)\s+(?:lokasi|location|share\s*loc|map|maps)\s+(OFR-\d+)\s*[?.]*$/i);
+      if (mLocFwd) {
+        const oL = offersDb.find((x) => x.id.toUpperCase() === mLocFwd[1].toUpperCase());
+        if (!oL) return nogoReply(`ⓘ ${mLocFwd[1].toUpperCase()} tidak ditemukan.`);
+        if (oL.status !== "DEAL" || !oL.fulfil || ["SELESAI", "BATAL", "SENGKETA"].includes(oL.fulfil)) return nogoReply(`ⓘ ${oL.id} tidak dalam pengiriman aktif.`);
+        const iamBuyerL = normalizePhone(oL.buyerPhone) === mePhone;
+        const iamSellerL = !!meFarmer && oL.lines.some((l) => l.farmerId === meFarmer!.id && Number(l.alokasiKg) > 0);
+        if (!iamBuyerL && !iamSellerL && !isAdmin) return nogoReply(`ⓘ Hanya pihak ${oL.id} yang bisa teruskan lokasi.`);
+        const la = negoUser?.locLat, ln = negoUser?.locLng;
+        if (!Number.isFinite(la) || !Number.isFinite(ln)) return nogoReply(`📍 Bagikan Share Location dulu (📎 > Lokasi > Kirim lokasi saat ini), lalu ulangi perintah ini.`);
+        const dryL = process.env.DISABLE_WA_OUTBOUND === "true";
+        const targets: { phone: string; label: string }[] = (iamBuyerL && !iamSellerL)
+          ? oL.lines.filter((l) => Number(l.alokasiKg) > 0).map((l) => {
+            const f = farmersDb.find((x) => x.id === l.farmerId);
+            return { phone: String(f?.noHp || ""), label: l.farmerId };
+          }).filter((t) => !!t.phone)
+          : [{ phone: oL.buyerPhone, label: "buyer" }];
+        let sentN = 0;
+        for (const t of targets) {
+          const okL = dryL ? true : (await sendWaLocation(t.phone, la as number, ln as number, `Lokasi untuk ${oL.id}`, "Diteruskan via Hai Tani").catch(() => ({ ok: false } as any))).ok;
+          if (okL) {
+            sentN++;
+            emitCanonicalEvent({ source: "wa-chat", entity: "offer", entityId: oL.id, action: "notify", actor: "system", payload: { to: t.label === "buyer" ? "buyer" : "farmer", phase: "lokasi-forward-cmd", channel: dryL ? "dry" : "location", dry: dryL } });
+          }
+        }
+        if (sentN === 0) return nogoReply(`ⓘ Lokasi ${oL.id} gagal diteruskan. Coba lagi.`);
+        return nogoReply(`📍 Lokasi Anda diteruskan ke ${targets.map((t) => t.label).join(", ")} untuk ${oL.id}.${dryL ? " (mode uji: tanpa kirim WA)" : ""}`);
+      }
+
       // (2b) Spek buyer ("spek OFR-003: ukuran besar" / "spek: ..."). "-" menghapus.
       // P1-17b: "spek" BUKAN prefix "spesifikasi" — dua alternatif eksplisit.
       const mSpek = String(message || "").match(/^\s*(?:spek|spesifikasi)\s*(?:(OFR-\d+)\s*:|:)?\s*(.+?)\s*$/i);
@@ -8287,6 +8728,20 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           payload: { spesifikasi: spekTxt, status: oS.status },
         });
         return nogoReply(`✅ Spek *${oS.id}* dicatat: "${spekTxt}".\nPetani diminta verifikasi sanggup/tidak saat pasang harga.`);
+      }
+
+      // (2c) Harga telanjang petani ("50000", "setuju 50rb", "deal 45rb") utk
+      // offer OPEN miliknya — tanpa pending, tanpa draf. Anti-nyasar: butuh
+      // line BELUM-berharga + pola angka utuh + bukan-buyer-pending.
+      const mBarePrice = !pa && !!meFarmer && !hasOpenDraft && String(message || "").match(/^\s*(?:setuju|oke|ok|deal|acc|saya terima|seharga|harganya|harga|jadi)?\s*([\d][\d.,]*)\s*(rb|ribu|juta|jt|k)?\s*(\/kg|per\s*kg|perkilo)?\s*[?.!]*$/i);
+      if (mBarePrice) {
+        const oP = [...offersDb].reverse().find((x) => (x.status === "OPEN" || x.status === "SEBAGIAN") && x.lines.some((l) => l.farmerId === meFarmer!.id && !Number(l.hargaPetaniPerKg)));
+        if (oP) {
+          const pv = parseRpPerKg(String(message || ""));
+          if (pv !== undefined && pv > 0) {
+            return nogoReply(doFarmerPrice(oP, pv), ["Cek Penawaran"]);
+          }
+        }
       }
 
       // (3) Demand buyer baru ("butuh kentang 2 ton"). Saprodi lolos ke ERP.
@@ -8319,8 +8774,8 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             }
             for (const k of cands.slice(0, 10)) {
               const ln = reuse.lines.find((l) => l.farmerId === k.farmerId);
-              if (ln) { ln.stokKg = Math.round(Number(k.stokSiapJualTon) * 1000); ln.komoditasId = k.id; }
-              else reuse.lines.push({ farmerId: k.farmerId, komoditasId: k.id, stokKg: Math.round(Number(k.stokSiapJualTon) * 1000) });
+              if (ln) { ln.stokKg = Math.round(Number(k.stokSiapJualTon) * 1000); ln.komoditasId = k.id; if (!Number(ln.hargaPetaniPerKg) && Number(k.hargaMintaPerKg) > 0) { ln.hargaPetaniPerKg = Number(k.hargaMintaPerKg); ln.hargaAt = k.hargaMintaAt || new Date().toISOString(); } }
+              else reuse.lines.push({ farmerId: k.farmerId, komoditasId: k.id, stokKg: Math.round(Number(k.stokSiapJualTon) * 1000), ...(Number(k.hargaMintaPerKg) > 0 ? { hargaPetaniPerKg: Number(k.hargaMintaPerKg), hargaAt: k.hargaMintaAt || new Date().toISOString() } : {}) });
             }
             const ev = evalOffer(reuse);
             saveOffersToDisk();
@@ -8343,7 +8798,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             updatedAt: now,
           };
           for (const k of cands.slice(0, 10)) {
-            o.lines.push({ farmerId: k.farmerId, komoditasId: k.id, stokKg: Math.round(Number(k.stokSiapJualTon) * 1000) });
+            o.lines.push({ farmerId: k.farmerId, komoditasId: k.id, stokKg: Math.round(Number(k.stokSiapJualTon) * 1000), ...(Number(k.hargaMintaPerKg) > 0 ? { hargaPetaniPerKg: Number(k.hargaMintaPerKg), hargaAt: k.hargaMintaAt || new Date().toISOString() } : {}) });
           }
           offersDb.push(o);
           saveOffersToDisk();
@@ -8471,11 +8926,12 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
             for (const o of opens) {
               let ln = o.lines.find((l) => l.farmerId === meFarmer!.id);
               if (!ln) {
-                ln = { farmerId: meFarmer!.id, komoditasId: target.id, stokKg: Math.round(qtyKg) };
+                ln = { farmerId: meFarmer!.id, komoditasId: target.id, stokKg: Math.round(qtyKg), ...(Number(target.hargaMintaPerKg) > 0 ? { hargaPetaniPerKg: Number(target.hargaMintaPerKg), hargaAt: target.hargaMintaAt || new Date().toISOString() } : {}) };
                 o.lines.push(ln);
               } else {
                 ln.stokKg = Math.round(qtyKg);
                 ln.komoditasId = target.id;
+                if (!Number(ln.hargaPetaniPerKg) && Number(target.hargaMintaPerKg) > 0) { ln.hargaPetaniPerKg = Number(target.hargaMintaPerKg); ln.hargaAt = target.hargaMintaAt || new Date().toISOString(); }
               }
               if (inlinePrice !== undefined) {
                 ln.hargaPetaniPerKg = inlinePrice;
@@ -8484,6 +8940,7 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
               evalOffer(o);
               o.updatedAt = nowS;
             }
+            for (const o of opens) evalOffer(o); // adopsi harga bisa langsung COCOK.
             if (opens.length > 0) saveOffersToDisk();
             // Tanya harga untuk penawaran TERBARU yang belum berharga (basi diabaikan).
             const askPriceFor = inlinePrice === undefined

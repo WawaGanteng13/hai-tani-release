@@ -216,7 +216,7 @@ async function sendWaReply(to: string, body: string): Promise<boolean> {
           const chatRes = await fetch(backend + "/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-tani-forward-secret": fwd },
-            body: JSON.stringify({ message: (inc as any).text, senderPhone: (inc as any).from }),
+            body: JSON.stringify({ message: (inc as any).text, senderPhone: (inc as any).from, viaWa: true }),
             signal: chatCtl.signal,
           });
           if (!chatRes.ok) return null;
