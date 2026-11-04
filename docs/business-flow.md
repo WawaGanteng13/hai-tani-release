@@ -11,6 +11,8 @@ flowchart LR
     K[Bank / LPK] <--> H
     U[Universitas] <--> H
     H --> R[Pencatatan + Matchmaking + Rekber via Bank Mitra]
+    B -. "bayar (escrow)" .-> K
+    K -. "cair saat terima" .-> P
 ```
 
 ## Roles
