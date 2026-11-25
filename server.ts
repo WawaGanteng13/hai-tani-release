@@ -50,6 +50,7 @@ import { REFERENSI_PERTANIAN } from "./src/data/referensi_pertanian";
 import { nextId } from "./lib/next-id";
 import { nextSheetRow } from "./lib/sheet-row";
 import { initSheetsSync, enqueueSheetSync, drainSheetsQueue, getSheetsStatus, getSheetsRemote } from "./lib/sheets-sync";
+import { buildDecisionPrompt, parseDecisionResponse } from "./lib/decision";
 import multer from "multer";
 
 dotenv.config();
@@ -3793,7 +3794,7 @@ const ERP_HPP_RE = /\bhpp\b|biaya pokok|biaya per kilo|margin|untung per kilo|im
 const ERP_QTY_UNIT_RE = /([\d][\d.,]*)\s*(sak|kg|liter|botol|bungkus|pak|unit|karung|ton)\b/;
 function detectErpIntent(
   lower: string,
-  laya: { intent: string; confidence: number } | null | undefined,
+  decision: { intent: string; confidence: number } | null | undefined,
 ): "cash" | "stock" | "hpp" | null {
   const t = lower || "";
   // HPP dicek dulu: "biaya per kilo" mengandung kata umum "biaya" milik kas
@@ -3804,10 +3805,10 @@ function detectErpIntent(
   // "urea keluar 5 sak": kata masuk/keluar + qty+satuan, tanpa kata "stok"
   // (\bmasuk\b tidak match "masukkan" milik alur daftar lahan)
   if (/\b(masuk|keluar)\b/.test(t) && ERP_QTY_UNIT_RE.test(t)) return "stock";
-  if (laya && (laya.confidence || 0) >= 0.5) {
-    if (laya.intent === "catat_kas") return "cash";
-    if (laya.intent === "catat_stok") return "stock";
-    if (laya.intent === "hitung_hpp") return "hpp";
+  if (decision && (decision.confidence || 0) >= 0.5) {
+    if (decision.intent === "catat_kas") return "cash";
+    if (decision.intent === "catat_stok") return "stock";
+    if (decision.intent === "hitung_hpp") return "hpp";
   }
   return null;
 }
@@ -4174,11 +4175,19 @@ function formatSuccessHpp(r: HppReport): string {
     (r.totalPendapatanRp ? `• Pendapatan tercatat: Rp ${r.totalPendapatanRp.toLocaleString("id-ID")}` : "")
   );
 }
+// Mesin keputusan intent: "gemini" | "laya" | "auto" (default: Gemini bila
+// GEMINI_API_KEY terisi, else sidecar Laya). Kedua engine berbagi bentuk hasil
+// {intent, confidence, model, source} + cache 60 mnt. Regex tetap jalan dulu
+// (0ms); engine hanya fetch saat regex miss.
+const INTENT_ENGINE = (() => {
+  const v = (process.env.INTENT_ENGINE || "auto").trim().toLowerCase();
+  return v === "gemini" || v === "laya" ? v : "auto";
+})();
 // Laya intent sidecar (stdlib http, opt-in via LAYA_URL or local auto-daemon). Timeout 1.2s, cooldown 30s saat down.
-// Lazy: hanya fetch saat regex belum yakin + cache 60 mnt. Regex hit -> 0ms overhead.
 const LAYA_URL = (process.env.LAYA_URL?.trim() || "http://127.0.0.1:8787").replace(/\/+$/, "");
 let layaUnavailableUntil = 0;
-const layaCache = new Map<string, { v: { intent: string; confidence: number; model?: string; source?: string }; exp: number }>();
+let geminiDecisionUnavailableUntil = 0;
+const decisionCache = new Map<string, { v: { intent: string; confidence: number; model?: string; source?: string }; exp: number }>();
 
 let layaProcess: ChildProcess | null = null;
 // Kandidat interpreter: env LAYA_PYTHON diutamakan; Windows pakai "python" dulu
@@ -4247,6 +4256,10 @@ function startLayaWith(pyScript: string, cmds: string[], startedAt: number = Dat
 
 function initLayaDaemon() {
   if (process.env.DISABLE_LAYA_SIDECAR === "true") return;
+  if (INTENT_ENGINE === "gemini") {
+    console.log("[Laya Daemon] Dilewati (INTENT_ENGINE=gemini, tanpa proses Python).");
+    return;
+  }
   try {
     const pyScript = path.join(process.cwd(), "laya_sidecar.py");
     if (!fs.existsSync(pyScript)) return;
@@ -4259,15 +4272,15 @@ function initLayaDaemon() {
 async function getLayaIntent(message: string): Promise<{ intent: string; confidence: number; model?: string; source?: string } | null> {
   if (!message || !LAYA_URL || Date.now() < layaUnavailableUntil) return null;
   const key = message.slice(0, 200).toLowerCase();
-  const hit = layaCache.get(key);
+  const hit = decisionCache.get(key);
   if (hit) {
     if (Date.now() < hit.exp) return hit.v;
-    layaCache.delete(key);
+    decisionCache.delete(key);
   }
-  if (layaCache.size > 2000) {
-    for (const [k, v] of layaCache) {
-      if (Date.now() > v.exp) layaCache.delete(k);
-      if (layaCache.size <= 1500) break;
+  if (decisionCache.size > 2000) {
+    for (const [k, v] of decisionCache) {
+      if (Date.now() > v.exp) decisionCache.delete(k);
+      if (decisionCache.size <= 1500) break;
     }
   }
   try {
@@ -4289,13 +4302,61 @@ async function getLayaIntent(message: string): Promise<{ intent: string; confide
       model: j.model ? String(j.model) : undefined,
       source: "laya_sidecar",
     };
-    layaCache.set(key, { v, exp: Date.now() + 3600000 });
+    decisionCache.set(key, { v, exp: Date.now() + 3600000 });
     console.log(`[Laya Decision] Intent: "${v.intent}" (${(v.confidence * 100).toFixed(1)}%) for "${message.slice(0, 30)}..."`);
     return v;
   } catch {
     layaUnavailableUntil = Date.now() + 30000;
     return null;
   }
+}
+
+// Klasifikasi intent via Gemini (pengganti sidecar Laya). Bentuk hasil identik
+// {intent, confidence, model, source} + cache & cooldown yang sama. Timeout
+// 6 dtk: lite p50 ~1.8 dtk; null saat gagal agar regex/caller tetap jalan.
+async function getGeminiIntent(message: string): Promise<{ intent: string; confidence: number; model?: string; source?: string } | null> {
+  const ai = getGemini();
+  if (!message || !ai || Date.now() < geminiDecisionUnavailableUntil) return null;
+  const key = message.slice(0, 200).toLowerCase();
+  const hit = decisionCache.get(key);
+  if (hit && Date.now() < hit.exp) return hit.v;
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 6000);
+    let g: { text: string; model: string };
+    try {
+      g = await callGeminiGenerate(ai, buildDecisionPrompt(message), { signal: c.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    const parsed = parseDecisionResponse(g.text);
+    if (!parsed) throw new Error("unparseable decision");
+    const v = {
+      intent: parsed.intent,
+      confidence: parsed.confidence,
+      model: g.model,
+      source: "gemini_decision",
+    };
+    decisionCache.set(key, { v, exp: Date.now() + 3600000 });
+    console.log(`[Gemini Decision] Intent: "${v.intent}" (${(v.confidence * 100).toFixed(1)}%) for "${message.slice(0, 30)}..."`);
+    return v;
+  } catch {
+    geminiDecisionUnavailableUntil = Date.now() + 30000;
+    return null;
+  }
+}
+
+// Pintu tunggal klasifikasi intent. auto = Gemini bila kunci ada (lebih akurat
+// + tanpa proses Python), fallback sidecar Laya bila Gemini gagal/null.
+async function getDecisionIntent(message: string): Promise<{ intent: string; confidence: number; model?: string; source?: string } | null> {
+  const wantGemini = INTENT_ENGINE === "gemini" || (INTENT_ENGINE === "auto" && !!getGemini());
+  if (wantGemini) {
+    const g = await getGeminiIntent(message);
+    if (g) return g;
+    if (INTENT_ENGINE === "gemini") return null;
+  }
+  if (INTENT_ENGINE === "laya" || INTENT_ENGINE === "auto") return getLayaIntent(message);
+  return null;
 }
 
 // 1. Targeted & Summarized Context Builder (No massive raw JSON dumps!)
@@ -5296,6 +5357,10 @@ export function createServerApp() {
         model: getNimConfig().model,
       },
       laya: { url: LAYA_URL, down: Date.now() < layaUnavailableUntil },
+      decision: {
+        engine: INTENT_ENGINE,
+        geminiAvailable: !!getGemini() && Date.now() >= geminiDecisionUnavailableUntil,
+      },
     });
   });
 
@@ -5429,6 +5494,8 @@ export function createServerApp() {
     res.json({
       configured: !!LAYA_URL,
       url: LAYA_URL,
+      decisionEngine: INTENT_ENGINE,
+      geminiDecision: { available: !!getGemini(), down: Date.now() < geminiDecisionUnavailableUntil },
       healthy: sidecarHealthy,
       circuitBreakerActive: isCircuitOpen,
       circuitBreakerCooldownRemainingSec: isCircuitOpen
@@ -5437,7 +5504,7 @@ export function createServerApp() {
       latencyMs,
       sidecarDetails: sidecarData,
       cacheStats: {
-        cachedKeysCount: layaCache.size,
+        cachedKeysCount: decisionCache.size,
         maxKeys: 2000,
         ttlMs: 600000,
       },
@@ -5465,15 +5532,17 @@ export function createServerApp() {
       return res.status(400).json({ error: "Text string is required" });
     }
     const t0 = Date.now();
-    const layaResult = await getLayaIntent(text);
+    const decisionResult = await getDecisionIntent(text);
     const latencyMs = Date.now() - t0;
 
     res.json({
       text,
-      result: layaResult,
+      result: decisionResult,
       latencyMs,
-      source: layaResult ? (layaResult.source || "laya_engine") : "fallback_heuristic",
-      layaAvailable: Date.now() >= layaUnavailableUntil && !!LAYA_URL,
+      source: decisionResult ? (decisionResult.source || "laya_engine") : "fallback_heuristic",
+      layaAvailable: INTENT_ENGINE !== "gemini" && Date.now() >= layaUnavailableUntil && !!LAYA_URL,
+      decisionEngine: INTENT_ENGINE,
+      geminiDecisionAvailable: !!getGemini() && Date.now() >= geminiDecisionUnavailableUntil,
     });
   });
 
@@ -8107,13 +8176,13 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
     const fast = handleFastSmalltalk(message, isAdmin, activeAdmin, effPhone, hasOpenDraft);
     if (fast) return res.json({ ...fast, aiProvider: "fast_path" } as any);
 
-    // Laya intent lazy: regex dulu (0ms), sidecar hanya saat regex miss.
-    // Null saat sidecar mati -> regex tetap jalan.
-    let _chatLaya: { intent: string; confidence: number } | null | undefined;
-    const chatLaya = async () => {
-      if (_chatLaya !== undefined) return _chatLaya;
-      _chatLaya = await getLayaIntent(message);
-      return _chatLaya;
+    // Decision intent lazy: regex dulu (0ms), engine hanya saat regex miss.
+    // Null saat engine mati -> regex tetap jalan.
+    let _chatDecision: { intent: string; confidence: number } | null | undefined;
+    const chatDecision = async () => {
+      if (_chatDecision !== undefined) return _chatDecision;
+      _chatDecision = await getDecisionIntent(message);
+      return _chatDecision;
     };
 
     // 0. Cancellation controller: stops AI generation immediately if client aborts or cancels
@@ -9371,12 +9440,12 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
           aiProvider: "rule_based",
         });
       }
-      // Lazy-benar: regex dulu (0ms); sidecar hanya saat regex miss.
+      // Lazy-benar: regex dulu (0ms); engine hanya saat regex miss.
       let erpIntent = detectErpIntent(erpLower, null);
-      let layaErp: { intent: string; confidence: number } | null | undefined = null;
+      let decisionErp: { intent: string; confidence: number } | null | undefined = null;
       if (!erpIntent) {
-        layaErp = await chatLaya();
-        erpIntent = detectErpIntent(erpLower, layaErp);
+        decisionErp = await chatDecision();
+        erpIntent = detectErpIntent(erpLower, decisionErp);
       }
       const cashDraftIn = (currentCashDraft || {}) as Partial<CashTransaction>;
       const stockDraftIn = (currentStockDraft || {}) as Partial<StockMutation>;
@@ -9390,8 +9459,8 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
       ].sort((a, b) => b.n - a.n);
       if (!erpIntent && draftScores[0].n > 0) {
         const otherIntent =
-          (layaErp && (layaErp.confidence || 0) >= 0.5 &&
-            ["daftar_lahan", "supplier", "cek_harga", "hama_pupuk"].includes(layaErp.intent)) ||
+          (decisionErp && (decisionErp.confidence || 0) >= 0.5 &&
+            ["daftar_lahan", "supplier", "cek_harga", "hama_pupuk"].includes(decisionErp.intent)) ||
           /daftar lahan|tambah (lahan|tani|kios|supplier)|supplier baru|berapa harga|harga .*(hari ini|sekarang|pasar)|cek harga|hama|penyakit|konsultasi|rekap|ringkas|ekspor|peta|webhook/.test(erpLower);
         if (!otherIntent) erpIntent = draftScores[0].kind;
       }
@@ -9428,10 +9497,10 @@ ATURAN HEMAT BIAYA: Berikan respon HANYA dalam JSON valid, padat, dan tanpa urai
         currentSupplierDraft.kontak);
     const isSupplierRegex = isSupplierIntent(message);
     let isSupplierMsg = isSupplierRegex;
-    // Niat beli/butuh bukan pendaftaran supplier: jangan tanya Laya agar verdict
+    // Niat beli/butuh bukan pendaftaran supplier: jangan tanya engine agar verdict
     // "supplier" tak membajak demand buyer ("saya mau beli agave" -> draf supplier).
     if (!isSupplierMsg && !/\b(butuh|cari|carikan|beli|membeli|perlu|butuhin|nyari|order|pesan)\b/i.test(message || "")) {
-      const l = await chatLaya();
+      const l = await chatDecision();
       isSupplierMsg = l?.intent === "supplier" && (l?.confidence || 0) >= 0.5;
     }
     const lowerMsg = (message || "").toLowerCase();
@@ -9917,11 +9986,11 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       });
     }
     const leanContext = buildLeanTargetedContext(message, false);
-    const layaDetected = ai ? await chatLaya() : null; // rule path (ai null) tak butuh fetch ~1 dtk
+    const decisionDetected = ai ? await chatDecision() : null; // rule path (ai null) tak butuh fetch engine
 
     const systemInstructions = `Anda adalah "Kang Tani AI", asisten digital cerdas, sopan, dan hangat di WhatsApp untuk petani Indonesia.
 
-${layaDetected && layaDetected.confidence >= 0.5 ? `[KLASIFIKASI INTENT LAYA]: Maksud petani terdeteksi = "${layaDetected.intent}" (Confidence: ${(layaDetected.confidence * 100).toFixed(0)}%). Prioritaskan fokus pada topik ini.\n` : ""}${leanContext.summary}
+${decisionDetected && decisionDetected.confidence >= 0.5 ? `[KLASIFIKASI INTENT]: Maksud petani terdeteksi = "${decisionDetected.intent}" (Confidence: ${(decisionDetected.confidence * 100).toFixed(0)}%). Prioritaskan fokus pada topik ini.\n` : ""}${leanContext.summary}
 ${leanContext.targetedDetails ? `${leanContext.targetedDetails}\n` : ""}
 ${leanContext.marketHighlight ? `${leanContext.marketHighlight}\n` : ""}
 ${currentDraft && Object.keys(currentDraft).length > 0 ? `DRAFT DATA TERKUMPUL: ${JSON.stringify(currentDraft)}` : ""}
@@ -9956,16 +10025,16 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
       // Intelligent rule-based fallback if API key is not yet set
       const lower = (message || "").toLowerCase();
       const regexAdd = isAddRegex(lower);
-      // Lazy laya: hanya fetch saat regex miss (0ms saat regex hit).
-      let laya: { intent: string; confidence: number } | null = null;
-      if (!regexAdd) laya = await chatLaya();
-      const isAddIntent = regexAdd || (laya?.intent === "daftar_lahan" && (laya?.confidence || 0) >= 0.5);
+      // Lazy decision: hanya fetch saat regex miss (0ms saat regex hit).
+      let decision: { intent: string; confidence: number } | null = null;
+      if (!regexAdd) decision = await chatDecision();
+      const isAddIntent = regexAdd || (decision?.intent === "daftar_lahan" && (decision?.confidence || 0) >= 0.5);
       const isPriceIntent =
         lower.includes("harga") ||
         lower.includes("pasar") ||
         lower.includes("anomali") ||
-        (laya?.intent === "cek_harga" && (laya?.confidence || 0) >= 0.5);
-      const isHamaIntent = laya?.intent === "hama_pupuk" && (laya?.confidence || 0) >= 0.5;
+        (decision?.intent === "cek_harga" && (decision?.confidence || 0) >= 0.5);
+      const isHamaIntent = decision?.intent === "hama_pupuk" && (decision?.confidence || 0) >= 0.5;
 
       const reg = extractFarmerFromText(message, currentDraft || {});
       let extracted: Partial<FarmerRecord> = { ...(currentDraft || {}), ...reg.extracted };
@@ -10224,14 +10293,14 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
     console.log("[Chat Info] Serving rule-based fallback reply");
     const lower = (message || "").toLowerCase();
     const regexAdd = isAddRegex(lower);
-    // Lazy laya: hanya fetch saat regex miss.
-    let layaFb: { intent: string; confidence: number } | null = null;
-    if (!regexAdd) layaFb = await chatLaya();
-    const isAddRequest = regexAdd || (layaFb?.intent === "daftar_lahan" && (layaFb?.confidence || 0) >= 0.5);
+    // Lazy decision: hanya fetch saat regex miss.
+    let decisionFb: { intent: string; confidence: number } | null = null;
+    if (!regexAdd) decisionFb = await chatDecision();
+    const isAddRequest = regexAdd || (decisionFb?.intent === "daftar_lahan" && (decisionFb?.confidence || 0) >= 0.5);
     const isPriceFb =
       lower.includes("harga") ||
       lower.includes("pasar") ||
-      (layaFb?.intent === "cek_harga" && (layaFb?.confidence || 0) >= 0.5);
+      (decisionFb?.intent === "cek_harga" && (decisionFb?.confidence || 0) >= 0.5);
 
     const reg = extractFarmerFromText(message, currentDraft || {});
     const extracted: Partial<FarmerRecord> = { ...(currentDraft || {}), ...reg.extracted };
@@ -11105,7 +11174,8 @@ BATASAN & ATURAN PANJANG JAWABAN (HEMAT TOKEN):
 async function startServer() {
   loadEventsDb();
   const app = createServerApp();
-  const PORT = process.env.SMOKE_PORT ? Number(process.env.SMOKE_PORT) : 3000;
+  // Cloud Run menyuntik PORT (default 8080); SMOKE_PORT tetap prioritas (CI/smoke lokal).
+  const PORT = Number(process.env.SMOKE_PORT || process.env.PORT || 3000);
 
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");

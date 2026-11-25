@@ -1,0 +1,12 @@
+# Jangkar root dengan slash depan (lihat .dockerignore).
+/.gcloudignore
+/.git/
+/node_modules/
+/dist/
+/data/
+.env
+*.log
+/test-evidence/
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,13 @@
+# Jangkar root dengan slash depan: pola tanpa slash cocok di SEMUA level
+# ('data' polos terbukti menelan src/data/ hingga build gagal).
+/node_modules/
+/dist/
+/data/
+.git/
+.env
+*.log
+/coverage/
+/test-evidence/
+.vscode/
+.idea/
+.DS_Store

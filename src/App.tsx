@@ -202,6 +202,20 @@ function AdminApp() {
     }
   };
 
+  // Handle set/reset dashboard password for an admin (SUPER_ADMIN / ADMIN_UTAMA session)
+  const handleSetPassword = async (noHp: string, password: string, requesterNoHp: string) => {
+    const res = await api('/api/auth/setup-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ noHp, password, requesterNoHp }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Gagal menyimpan password');
+    }
+    showToast(`Password dashboard ${noHp} berhasil disimpan.`, 'success');
+  };
+
   // Handle deleting admin
   const handleDeleteAdmin = async (id: string, requesterNoHp: string) => {
     try {
@@ -599,6 +613,7 @@ function AdminApp() {
         admins={admins}
         onAddAdmin={handleAddAdmin}
         onDeleteAdmin={handleDeleteAdmin}
+        onSetPassword={handleSetPassword}
       />
 
       <LayaModal

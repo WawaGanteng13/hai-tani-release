@@ -1,0 +1,57 @@
+# Cloud Build: bangun image Hai Tani + deploy ke Cloud Run.
+# Jalur Console (tanpa install): Cloud Run > Create Service > Deploy from repo >
+# pilih repo ini > Dockerfile (file ini) > atur env/volume sesuai docs/cloud-onboarding.md.
+# Jalur CLI: gcloud builds submit --config cloudbuild.yaml \
+#   --substitutions _REGION=asia-southeast2,_DATA_BUCKET=haitani-prod-data,_MIN_INSTANCES=1
+# Prasyarat: bucket GCS + secret terisi dahulu (lihat runbook) atau deploy gagal.
+substitutions:
+  _REGION: asia-southeast2
+  _DATA_BUCKET: haitani-prod-data
+  _MIN_INSTANCES: "1"
+  _SERVICE: haitani-backend
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/haitani/${_SERVICE}:$BUILD_ID
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/haitani/${_SERVICE}:latest
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/haitani/${_SERVICE}
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/haitani/${_SERVICE}:$BUILD_ID
+      - --region=${_REGION}
+      - --platform=managed
+      - --service-account=haitani-run@$PROJECT_ID.iam.gserviceaccount.com
+      - --allow-unauthenticated
+      - --port=8080
+      - --cpu=1
+      - --memory=1Gi
+      - --min-instances=${_MIN_INSTANCES}
+      - --max-instances=3
+      - --add-volume=name=haitani-data,type=cloud-storage,bucket=${_DATA_BUCKET}
+      - --add-volume-mount=volume=haitani-data,mount-path=/mnt/data
+      # ^;^ = pemisah custom: nilai CORS_ORIGINS mengandung koma.
+      - >-
+        --set-env-vars=^;^NODE_ENV=production;DATA_DIR=/mnt/data;INTENT_ENGINE=gemini;
+        APP_URL=https://haitani-backend-b3tmozcflq-et.a.run.app;
+        KARTU_PUBLIC_BASE=https://haitani-backend-b3tmozcflq-et.a.run.app;
+        CORS_ORIGINS=https://haitani.my.id,https://www.haitani.my.id
+      - >-
+        --update-secrets=GEMINI_API_KEY=haitani-gemini-key:latest,WHATSAPP_ACCESS_TOKEN=haitani-wa-token:latest,WHATSAPP_APP_SECRET=haitani-wa-appsecret:latest,FORWARD_SECRET=haitani-forward-secret:latest
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/haitani/${_SERVICE}:$BUILD_ID
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/haitani/${_SERVICE}:latest
+# Pasca deploy #1: set URL eksak (lihat runbook langkah 5):
+# gcloud run services update ${_SERVICE} --region=${_REGION} \
+#   --update-env-vars=APP_URL=<run-url>,KARTU_PUBLIC_BASE=<run-url>
